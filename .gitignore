@@ -24,6 +24,7 @@ venv
 
 # Custom config file
 auto_rx/station.cfg
+auto_rx/station.nerdscan.cfg
 auto_rx/log/
 
 auto_rx/log_power.csv
@@ -53,6 +54,7 @@ auto_rx/mXXmod
 auto_rx/mp3h1mod
 auto_rx/mts01mod
 auto_rx/weathex301d
+auto_rx/rd94rd41drop
 
 m10
 meisei100mod
