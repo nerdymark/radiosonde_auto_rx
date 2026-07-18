@@ -832,6 +832,37 @@ def read_auto_rx_config(filename, no_sdr_test=False):
             )
             auto_rx_config["dft_detect_threshold"] = 0.0
 
+        # nerdscan fork - Bluesky (atproto) notification settings
+        try:
+            auto_rx_config["bluesky_enabled"] = config.getboolean("bluesky", "enabled")
+            auto_rx_config["bluesky_handle"] = config.get("bluesky", "handle")
+            auto_rx_config["bluesky_app_password"] = config.get("bluesky", "app_password")
+        except:
+            logging.debug("Config - No [bluesky] section, Bluesky notifications disabled.")
+            auto_rx_config["bluesky_enabled"] = False
+
+        if auto_rx_config["bluesky_enabled"]:
+            try:
+                auto_rx_config["bluesky_pds_url"] = config.get("bluesky", "pds_url")
+            except:
+                auto_rx_config["bluesky_pds_url"] = "https://bsky.social"
+            try:
+                auto_rx_config["bluesky_discovery_notifications"] = config.getboolean(
+                    "bluesky", "discovery_notifications"
+                )
+                auto_rx_config["bluesky_burst_notifications"] = config.getboolean(
+                    "bluesky", "burst_notifications"
+                )
+            except:
+                auto_rx_config["bluesky_discovery_notifications"] = True
+                auto_rx_config["bluesky_burst_notifications"] = True
+            try:
+                auto_rx_config["bluesky_burst_altitude_threshold"] = config.getfloat(
+                    "bluesky", "burst_altitude_threshold"
+                )
+            except:
+                auto_rx_config["bluesky_burst_altitude_threshold"] = 5000.0
+
         # If we are being called as part of a unit test, just return the config now.
         if no_sdr_test:
             return auto_rx_config

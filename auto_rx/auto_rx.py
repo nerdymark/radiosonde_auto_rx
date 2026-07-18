@@ -38,6 +38,7 @@ from autorx.scan import SondeScanner
 from autorx.decode import SondeDecoder, VALID_SONDE_TYPES, DRIFTY_SONDE_TYPES
 from autorx.logger import TelemetryLogger
 from autorx.email_notification import EmailNotification
+from autorx.bluesky import BlueskyNotification
 from autorx.aprs import APRSUploader
 from autorx.ozimux import OziUploader
 from autorx.sondehub import SondehubUploader
@@ -1077,6 +1078,25 @@ def main():
         exporter_functions.append(_rotator.add)
 
         autorx.rotator_object = _rotator
+
+    # Bluesky (atproto) Notifications (nerdscan fork)
+    if config["bluesky_enabled"]:
+        _bluesky_notification = BlueskyNotification(
+            handle=config["bluesky_handle"],
+            app_password=config["bluesky_app_password"],
+            pds_url=config["bluesky_pds_url"],
+            discovery_notifications=config["bluesky_discovery_notifications"],
+            burst_notifications=config["bluesky_burst_notifications"],
+            burst_altitude_threshold=config["bluesky_burst_altitude_threshold"],
+            station_position=(
+                config["station_lat"],
+                config["station_lon"],
+                config["station_alt"],
+            ),
+            station_callsign=config["habitat_uploader_callsign"],
+        )
+        exporter_objects.append(_bluesky_notification)
+        exporter_functions.append(_bluesky_notification.add)
 
     # Sondehub v2 Database
     if config["sondehub_enabled"]:

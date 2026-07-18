@@ -416,6 +416,29 @@ subject = <type> Sonde launch detected on <freq>: <id>
 nearby_landing_subject = Nearby Radiosonde Landing Detected - <id>
 
 
+#########################################
+# BLUESKY NOTIFICATIONS (nerdscan fork) #
+#########################################
+#   Post sonde discovery and balloon-burst events to a Bluesky account,
+#   in addition to the normal telemetry exporters.
+[bluesky]
+enabled = False
+# The Bluesky handle to post as, e.g. mystation.bsky.social
+handle = none
+# A Bluesky *App Password* (Settings -> Privacy and Security -> App Passwords).
+# Do NOT use your account password here.
+app_password = none
+# PDS to authenticate against. Leave as-is unless self-hosting.
+pds_url = https://bsky.social
+# Post when a new radiosonde is heard for the first time.
+discovery_notifications = True
+# Post when a tracked radiosonde bursts and starts descending.
+burst_notifications = True
+# A sonde must have been seen above this altitude (metres) before a sustained
+# descent is treated as a burst. Keeps low-level noise from triggering posts.
+burst_altitude_threshold = 5000
+
+
 ###################
 # ROTATOR CONTROL #
 ###################
