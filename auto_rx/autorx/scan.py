@@ -1006,7 +1006,17 @@ class SondeScanner(object):
 
             # Rough approximation of the noise floor of the received power spectrum.
             # Switched to use a Median instead of a Mean 2022-04-02. Should remove outliers better.
-            power_nf = np.median(power)
+            # Exclude never_scan regions from the estimate: strong blocklisted
+            # spurs otherwise sit in the median and bias it upwards, raising the
+            # effective detection threshold (power_nf + snr_threshold) on weak
+            # sondes elsewhere in the band.
+            _nf_mask = np.ones(len(power), dtype=bool)
+            for _frequency in np.array(self.never_scan) * 1e6:
+                _nf_mask &= np.abs(freq - _frequency) > (self.quantization / 2.0)
+            if np.any(_nf_mask):
+                power_nf = np.median(power[_nf_mask])
+            else:
+                power_nf = np.median(power)
             logging.debug(f"Noise Floor Estimate: {power_nf:.1f} dB uncal")
             # Pass the threshold data to the web client for plotting
             scan_result["threshold"] = power_nf
