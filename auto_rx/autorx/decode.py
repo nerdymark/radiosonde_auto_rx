@@ -1589,6 +1589,13 @@ class SondeDecoder(object):
                     self.demod_process.kill()
             except Exception as e:
                 self.log_debug("SIGKILL via subprocess.kill failed - %s" % str(e))
+            # Reap the killed subprocesses, so they don't linger as zombies.
+            try:
+                self.decode_process.wait(timeout=5)
+                if self.experimental_decoder:
+                    self.demod_process.wait(timeout=5)
+            except Exception as e:
+                self.log_debug("Reaping decoder subprocess failed - %s" % str(e))
             # Finally, join the async reader.
             self.async_reader.join()
 
