@@ -165,6 +165,7 @@ def start_scanner():
             scan_dwell_time=config["scan_dwell_time"],
             scan_delay=config["scan_delay"],
             detect_dwell_time=config["detect_dwell_time"],
+            dft_detect_threshold=config["dft_detect_threshold"],
             max_peaks=config["max_peaks"],
             rs_path=RS_PATH,
             sdr_type=config["sdr_type"],

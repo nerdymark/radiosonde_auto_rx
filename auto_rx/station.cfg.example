@@ -543,6 +543,12 @@ min_distance = 1000
 scan_dwell_time = 20
 # Scanner - Detection Dwell time - How long to wait for a sonde detection on each peak.
 detect_dwell_time = 5
+# Scanner - dft_detect correlation score threshold override (nerdscan fork).
+# 0 = use dft_detect's built-in per-sonde-type thresholds (0.60-0.80).
+# Setting a value (e.g. 0.55) overrides the threshold for ALL sonde types:
+# lower = more sensitive detection on weak signals, at the cost of more false
+# positives (which cost detect_dwell_time each and can start bogus decoders).
+dft_detect_threshold = 0
 # Scanner - Delay between scans. We should delay a short amount between scans to allow for decoders and other actions to jump in.
 scan_delay = 10
 # Quantize search results to x Hz steps. Useful as most sondes are on 10 kHz frequency steps.

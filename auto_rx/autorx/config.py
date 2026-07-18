@@ -134,6 +134,7 @@ def read_auto_rx_config(filename, no_sdr_test=False):
         "synchronous_upload": False,
         "scan_dwell_time": 20,
         "detect_dwell_time": 5,
+        "dft_detect_threshold": 0.0,
         "scan_delay": 10,
         "payload_id_valid": 5,
         "temporary_block_time": 60,
@@ -819,6 +820,17 @@ def read_auto_rx_config(filename, no_sdr_test=False):
                 "Config - Missing close_on_encrypted option (new in v1.8.2), using default (True)"
             )
             auto_rx_config["close_on_encrypted"] = True
+
+        # nerdscan fork - dft_detect correlation threshold override
+        try:
+            auto_rx_config["dft_detect_threshold"] = config.getfloat(
+                "advanced", "dft_detect_threshold"
+            )
+        except:
+            logging.debug(
+                "Config - Missing dft_detect_threshold option, using default (0 = dft_detect built-in thresholds)"
+            )
+            auto_rx_config["dft_detect_threshold"] = 0.0
 
         # If we are being called as part of a unit test, just return the config now.
         if no_sdr_test:

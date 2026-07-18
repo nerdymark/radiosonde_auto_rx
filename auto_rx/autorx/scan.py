@@ -425,7 +425,8 @@ def detect_sonde(
     bias=False,
     save_detection_audio=False,
     ngp_tweak=False,
-    wideband_sondes=False
+    wideband_sondes=False,
+    dft_threshold=0.0
 ):
     """Receive some FM and attempt to detect the presence of a radiosonde.
 
@@ -441,6 +442,9 @@ def detect_sonde(
         save_detection_audio (bool): Save the audio used in detection to a file.
         ngp_tweak (bool): When scanning in the 1680 MHz sonde band, use a narrower FM filter for better RS92-NGP detection.
         wideband_sondes (bool): Use a wider detection filter to allow detection of Weathex and wideband iMet sondes.
+        dft_threshold (float): If > 0, override dft_detect's built-in per-type correlation
+            score thresholds (0.6-0.8) with this value. Lower = more sensitive detection
+            at the cost of more false positives. 0 = use dft_detect defaults.
 
     Returns:
         str/None: Returns None if no sonde found, otherwise returns a sonde type, from the following:
@@ -466,6 +470,10 @@ def detect_sonde(
 
     # Add a -T option if bias is enabled
     bias_option = "-T " if bias else ""
+
+    # Optional override of dft_detect's built-in per-sonde-type correlation thresholds.
+    # Must be placed before the positional raw-samples arguments.
+    ths_option = "--ths %.2f " % dft_threshold if dft_threshold > 0 else ""
 
     # Add a gain parameter if we have been provided one.
     if gain != -1:
@@ -540,9 +548,10 @@ def detect_sonde(
 
         rx_test_command += os.path.join(
             rs_path, "dft_detect"
-        ) + " -t %d --iq --bw %d --dc - %d 16 2>/dev/null" % (
+        ) + " -t %d --iq --bw %d --dc %s- %d 16 2>/dev/null" % (
             dwell_time,
             _if_bw,
+            ths_option,
             _iq_bw,
         )
 
@@ -597,7 +606,8 @@ def detect_sonde(
         # Sample decoding / detection
         # Note that we detect for dwell_time seconds, and timeout after dwell_time*2, to catch if no samples are being passed through.
         rx_test_command += (
-            os.path.join(rs_path, "dft_detect") + " -t %d 2>/dev/null" % dwell_time
+            os.path.join(rs_path, "dft_detect")
+            + " -t %d %s2>/dev/null" % (dwell_time, ths_option)
         )
 
     _sdr_name = get_sdr_name(
@@ -682,6 +692,7 @@ class SondeScanner(object):
         quantization=10000,
         scan_dwell_time=20,
         detect_dwell_time=5,
+        dft_detect_threshold=0.0,
         scan_delay=10,
         max_peaks=10,
         scan_check_interval=10,
@@ -774,6 +785,7 @@ class SondeScanner(object):
         self.quantization = quantization
         self.scan_dwell_time = scan_dwell_time
         self.detect_dwell_time = detect_dwell_time
+        self.dft_detect_threshold = dft_detect_threshold
         self.scan_delay = scan_delay
         self.max_peaks = max_peaks
         self.rs_path = rs_path
@@ -1234,7 +1246,8 @@ class SondeScanner(object):
                     bias=self.bias,
                     dwell_time=self.detect_dwell_time,
                     save_detection_audio=self.save_detection_audio,
-                    wideband_sondes=self.wideband_sondes
+                    wideband_sondes=self.wideband_sondes,
+                    dft_threshold=self.dft_detect_threshold
                 )
 
                 if detected != None:
