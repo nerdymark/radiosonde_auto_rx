@@ -315,7 +315,12 @@ class BlueskyNotification(object):
             _lines.append("sondehub.org/%s" % strip_sonde_serial(_id))
 
         _lines.append("#radiosonde #sondehub #hamradio")
-        self.post("\n".join(_lines))
+        # Remember this post so the later burst event replies into the same thread.
+        _ref = self.post("\n".join(_lines))
+        if _ref:
+            if _id in self.sondes:
+                self.sondes[_id]["post_ref"] = _ref
+            self._remember_post(_id, _ref)
 
     def post_burst(self, telemetry, sonde_state):
         _id = telemetry["id"]
@@ -334,13 +339,20 @@ class BlueskyNotification(object):
         _lines.append(_stat)
         _lines.append("sondehub.org/%s" % strip_sonde_serial(_id))
         _lines.append("#radiosonde #sondehub")
-        self.post("\n".join(_lines))
+        # Thread the burst under this sonde's discovery post (from memory, or the
+        # persisted store if the discovery happened before an auto_rx restart).
+        _ref = self.sondes.get(_id, {}).get("post_ref") or self._recall_post(_id)
+        _reply = {"root": _ref, "parent": _ref} if _ref else None
+        self.post("\n".join(_lines), reply=_reply)
 
     # ------------------------------------------------------------------ xrpc
 
-    def post(self, text):
-        """Post text to Bluesky. Failures are logged, never raised - a Bluesky
-        outage must not affect telemetry processing."""
+    def post(self, text, reply=None):
+        """Post text to Bluesky. `reply`, if given, is an atproto reply ref
+        ({"root": {...}, "parent": {...}}) that threads this post under another.
+        Returns the created post's {"uri","cid"} (a strong ref usable to reply to
+        it later), or None on failure. Failures are logged, never raised - a
+        Bluesky outage must not affect telemetry processing."""
         _since_last = time.time() - self.last_post_time
         if _since_last < self.MIN_POST_INTERVAL:
             time.sleep(self.MIN_POST_INTERVAL - _since_last)
@@ -362,6 +374,8 @@ class BlueskyNotification(object):
                 .isoformat()
                 .replace("+00:00", "Z"),
             }
+            if reply:
+                _record["reply"] = reply
             _resp = requests.post(
                 self.pds_url + "/xrpc/com.atproto.repo.createRecord",
                 headers={"Authorization": "Bearer " + _session["accessJwt"]},
@@ -373,10 +387,14 @@ class BlueskyNotification(object):
                 timeout=30,
             )
             _resp.raise_for_status()
+            _resp = _resp.json()
             self.last_post_time = time.time()
             self.log_info("Posted: %s" % text.splitlines()[0])
+            if _resp.get("uri") and _resp.get("cid"):
+                return {"uri": _resp["uri"], "cid": _resp["cid"]}
         except Exception as e:
             self.log_error("Error posting to Bluesky - %s" % str(e))
+        return None
 
     # ------------------------------------------------------------ persistence
 
@@ -385,26 +403,43 @@ class BlueskyNotification(object):
             with open(self.notified_file, "r") as f:
                 _data = json.load(f)
             _cutoff = time.time() - self.NOTIFIED_TTL
-            return {
-                _id: _events
-                for (_id, _events) in _data.items()
-                if max(_events.values()) > _cutoff
-            }
+            # Keep an entry while any of its event *timestamps* is fresh. Non-numeric
+            # values (e.g. the "discovery_post" ref dict) are ignored for the cutoff.
+            out = {}
+            for _id, _events in _data.items():
+                _ts = [v for v in _events.values() if isinstance(v, (int, float))]
+                if _ts and max(_ts) > _cutoff:
+                    out[_id] = _events
+            return out
         except FileNotFoundError:
             return {}
         except Exception as e:
             self.log_error("Could not read notified-sondes file - %s" % str(e))
             return {}
 
-    def _mark_notified(self, _id, event):
-        if _id not in self.notified:
-            self.notified[_id] = {}
-        self.notified[_id][event] = time.time()
+    def _save_notified(self):
         try:
             with open(self.notified_file, "w") as f:
                 json.dump(self.notified, f)
         except Exception as e:
             self.log_error("Could not write notified-sondes file - %s" % str(e))
+
+    def _mark_notified(self, _id, event):
+        if _id not in self.notified:
+            self.notified[_id] = {}
+        self.notified[_id][event] = time.time()
+        self._save_notified()
+
+    def _remember_post(self, _id, ref):
+        """Persist a sonde's discovery-post ref so a later burst reply threads to
+        it even across an auto_rx restart."""
+        if _id not in self.notified:
+            self.notified[_id] = {}
+        self.notified[_id]["discovery_post"] = ref
+        self._save_notified()
+
+    def _recall_post(self, _id):
+        return self.notified.get(_id, {}).get("discovery_post")
 
     # ----------------------------------------------------------------- logging
 
