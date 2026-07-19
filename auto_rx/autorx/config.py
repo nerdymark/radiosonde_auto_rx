@@ -863,6 +863,40 @@ def read_auto_rx_config(filename, no_sdr_test=False):
             except:
                 auto_rx_config["bluesky_burst_altitude_threshold"] = 5000.0
 
+        # nerdscan fork - Caw (nerdymark.com) notification settings
+        try:
+            auto_rx_config["caw_enabled"] = config.getboolean("caw", "enabled")
+        except:
+            logging.debug("Config - No [caw] section, Caw notifications disabled.")
+            auto_rx_config["caw_enabled"] = False
+
+        if auto_rx_config["caw_enabled"]:
+            try:
+                auto_rx_config["caw_url"] = config.get("caw", "url")
+            except:
+                auto_rx_config["caw_url"] = "https://nerdymark.com/api/caw"
+            try:
+                auto_rx_config["caw_discovery_notifications"] = config.getboolean(
+                    "caw", "discovery_notifications")
+                auto_rx_config["caw_burst_notifications"] = config.getboolean(
+                    "caw", "burst_notifications")
+                auto_rx_config["caw_lost_contact_notifications"] = config.getboolean(
+                    "caw", "lost_contact_notifications")
+            except:
+                auto_rx_config["caw_discovery_notifications"] = True
+                auto_rx_config["caw_burst_notifications"] = True
+                auto_rx_config["caw_lost_contact_notifications"] = True
+            try:
+                auto_rx_config["caw_lost_contact_minutes"] = config.getint(
+                    "caw", "lost_contact_minutes")
+            except:
+                auto_rx_config["caw_lost_contact_minutes"] = 15
+            try:
+                auto_rx_config["caw_burst_altitude_threshold"] = config.getfloat(
+                    "caw", "burst_altitude_threshold")
+            except:
+                auto_rx_config["caw_burst_altitude_threshold"] = 5000.0
+
         # If we are being called as part of a unit test, just return the config now.
         if no_sdr_test:
             return auto_rx_config

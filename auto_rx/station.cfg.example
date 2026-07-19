@@ -439,6 +439,29 @@ burst_notifications = True
 burst_altitude_threshold = 5000
 
 
+#####################################
+# CAW NOTIFICATIONS (nerdscan fork) #
+#####################################
+#   Post sonde discovery / burst / lost-contact events to nerdymark.com's "caw"
+#   feed (ephemeral, location-based). Caws are posted at the STATION location
+#   (from [location] above), with the sonde's distance/bearing in the text.
+#   Anonymous POST, no auth.
+[caw]
+enabled = False
+# Caw write endpoint.
+url = https://nerdymark.com/api/caw
+# Post when a new radiosonde is first heard.
+discovery_notifications = True
+# Post when a tracked radiosonde bursts.
+burst_notifications = True
+# Post when a sonde goes silent (see lost_contact_minutes).
+lost_contact_notifications = True
+# Minutes of no telemetry before a "lost contact" caw fires.
+lost_contact_minutes = 15
+# Same burst gate as above (see [bluesky]).
+burst_altitude_threshold = 5000
+
+
 ###################
 # ROTATOR CONTROL #
 ###################

@@ -39,6 +39,7 @@ from autorx.decode import SondeDecoder, VALID_SONDE_TYPES, DRIFTY_SONDE_TYPES
 from autorx.logger import TelemetryLogger
 from autorx.email_notification import EmailNotification
 from autorx.bluesky import BlueskyNotification
+from autorx.caw import CawNotification
 from autorx.aprs import APRSUploader
 from autorx.ozimux import OziUploader
 from autorx.sondehub import SondehubUploader
@@ -1097,6 +1098,25 @@ def main():
         )
         exporter_objects.append(_bluesky_notification)
         exporter_functions.append(_bluesky_notification.add)
+
+    # Caw (nerdymark.com) Notifications (nerdscan fork)
+    if config["caw_enabled"]:
+        _caw_notification = CawNotification(
+            caw_url=config["caw_url"],
+            discovery_notifications=config["caw_discovery_notifications"],
+            burst_notifications=config["caw_burst_notifications"],
+            lost_contact_notifications=config["caw_lost_contact_notifications"],
+            burst_altitude_threshold=config["caw_burst_altitude_threshold"],
+            lost_contact_minutes=config["caw_lost_contact_minutes"],
+            station_position=(
+                config["station_lat"],
+                config["station_lon"],
+                config["station_alt"],
+            ),
+            station_callsign=config["habitat_uploader_callsign"],
+        )
+        exporter_objects.append(_caw_notification)
+        exporter_functions.append(_caw_notification.add)
 
     # Sondehub v2 Database
     if config["sondehub_enabled"]:
