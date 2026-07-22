@@ -22,6 +22,7 @@
     <script src="{{ url_for('static', filename='js/Leaflet.fullscreen.min.js') }}"></script>
     <script src="{{ url_for('static', filename='js/leaflet.edgebuffer.js') }}"></script>
     <script src="{{ url_for('static', filename='js/L.TileLayer.NoGap.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/leaflet-heat.js') }}"></script>
     <script src="{{ url_for('static', filename='js/socket.io.min.js') }}"></script>
     <script src="{{ url_for('static', filename='js/d3.3.5.3.min.js') }}" charset="utf-8"></script>
     <script src="{{ url_for('static', filename='js/utils.js') }}"></script>
@@ -171,6 +172,7 @@
                 $("#showsonde-mapquick").prop('disabled', true);
                 $("#showsonde-launches").prop('disabled', true);
                 $("#showsonde-coverage").prop('disabled', true);
+                $("#showsonde-heatmap").prop('disabled', true);
                 $("#hidesonde-map").prop('disabled', true);
                 $("#showsonde-skew").prop('disabled', true);
                 $("#hidesonde-skew").prop('disabled', true);
@@ -185,6 +187,7 @@
                 $("#showsonde-mapquick").prop('disabled', false);
                 $("#showsonde-launches").prop('disabled', false);
                 $("#showsonde-coverage").prop('disabled', false);
+                $("#showsonde-heatmap").prop('disabled', false);
                 $("#hidesonde-map").prop('disabled', false);
                 $("#showsonde-skew").prop('disabled', false);
                 $("#hidesonde-skew").prop('disabled', false);
@@ -196,62 +199,84 @@
                 $('#historicaltitle').html(" Auto-RX Historical");
             }
 
+            // Refs to the coverage/heatmap layers so re-plotting replaces
+            // rather than stacks them (Reset clears them via historicalsonde).
+            var coveragePolyLayer = null;
+            var coverageDxLayer = null;
+            var sondeHeatLayer = null;
+
             function showSondeCoverage () {
-                var layerBounds = new L.LatLngBounds();
-                layerBounds.extend([autorx_config.station_lat, autorx_config.station_lon]);
-
-                var polygonData = {};
-
-                var divisorValue = 2; //1-360
-                //should probablly be auto selected based on number of logs
-
-                table_data.forEach(coveragePoints);
-                function coveragePoints(value, index, array) {
-                    try {
-                        bearingRounded = Math.round(parseFloat(value['first']['bearing'])/divisorValue)*divisorValue;
-                        if (bearingRounded in polygonData) {
-                            if (parseFloat(value['first']['range_km']) > polygonData[bearingRounded][0]) {
-                                polygonData[bearingRounded] = [parseFloat(value['first']['range_km']), parseFloat(value['first']['lat']), parseFloat(value['first']['lon'])]
-                            }
-                        } else {
-                            polygonData[bearingRounded] = [parseFloat(value['first']['range_km']), parseFloat(value['first']['lat']), parseFloat(value['first']['lon'])]
-                        }
-                        bearingRounded = Math.round(parseFloat(value['last']['bearing'])/divisorValue)*divisorValue;
-                        if (bearingRounded in polygonData) {
-                            if (parseFloat(value['last']['range_km']) > polygonData[bearingRounded][0]) {
-                                polygonData[bearingRounded] = [parseFloat(value['last']['range_km']), parseFloat(value['last']['lat']), parseFloat(value['last']['lon'])]
-                            }
-                        } else {
-                            polygonData[bearingRounded] = [parseFloat(value['last']['range_km']), parseFloat(value['last']['lat']), parseFloat(value['last']['lon'])]
-                        }
-                        
-                    } catch (err) {}
-                }
-
-
-                // Fill in any empty slots with the station position, and 0 range.
-                for(let i = 0; i<=360; i=i+divisorValue){
-                    if(!polygonData.hasOwnProperty(i)){
-                        polygonData[i] = [0,autorx_config.station_lat, autorx_config.station_lon];
+                // Server-side digest of EVERY telemetry point in every log.
+                // (The old client-side version only looked at the first/last
+                // point of each flight, so mid-flight max-range points were
+                // missed and empty bearing bins collapsed to the station,
+                // leaving gaps and spikes in the polygon.)
+                $.getJSON("get_coverage_stats", function(data) {
+                    if (!data || data.error || !data.horizon || data.horizon.length == 0) {
+                        return;
                     }
-                }
+                    var layerBounds = new L.LatLngBounds();
+                    layerBounds.extend([autorx_config.station_lat, autorx_config.station_lon]);
 
-                //create polygon
-                var polygonLatLngs = []
+                    if (coveragePolyLayer) { historicalsonde.removeLayer(coveragePolyLayer); }
+                    if (coverageDxLayer) { historicalsonde.removeLayer(coverageDxLayer); }
 
-                for (const [key, value] of Object.entries(polygonData)) {
-                    tempLatLng = [value[1], value[2]];
-                    polygonLatLngs.push(tempLatLng);
-                    edge_lat = value[1];
-                    edge_lon = value[2];
-                    layerBounds.extend([edge_lat, edge_lon]);
-                }
+                    var polygonLatLngs = [];
+                    data.horizon.forEach(function(p) {
+                        polygonLatLngs.push([p.lat, p.lon]);
+                        layerBounds.extend([p.lat, p.lon]);
+                    });
 
-                var polygonTesting = L.polygon(polygonLatLngs, {color: 'red'});
+                    coveragePolyLayer = L.polygon(polygonLatLngs, {
+                        color: '#00c46b',
+                        weight: 2,
+                        opacity: 0.8,
+                        fillColor: '#00c46b',
+                        fillOpacity: 0.07
+                    });
+                    coveragePolyLayer.bindTooltip("Coverage horizon — farthest packet heard per " +
+                        data.azimuth_bin_deg + "&deg; of bearing (" + data.flights +
+                        " flights, " + data.points.toLocaleString() + " packets)",
+                        {sticky: true});
+                    historicalsonde.addLayer(coveragePolyLayer);
 
-                historicalsonde.addLayer(polygonTesting);
+                    if (data.max_range_point) {
+                        var _b = data.max_range_point;
+                        coverageDxLayer = L.circleMarker([_b.lat, _b.lon], {
+                            radius: 6,
+                            color: '#00c46b',
+                            weight: 2,
+                            fillColor: '#003d21',
+                            fillOpacity: 0.9
+                        });
+                        coverageDxLayer.bindPopup("<b>Best DX</b><br/>" + _b.range_km +
+                            " km @ " + _b.bearing + "&deg;<br/>" + _b.serial + " &middot; " +
+                            (_b.alt / 1000).toFixed(1) + " km altitude");
+                        historicalsonde.addLayer(coverageDxLayer);
+                    }
 
-                mymap.fitBounds(layerBounds);
+                    mymap.fitBounds(layerBounds);
+                });
+            }
+
+            function showSondeHeatmap () {
+                // Heat layer of every received telemetry position (decimated
+                // server-side). Radius is in pixels, so leaflet.heat re-renders
+                // per zoom level; corridors where flights overlap accumulate
+                // intensity and "heat up" as more logs land.
+                $.getJSON("get_coverage_stats", function(data) {
+                    if (!data || data.error || !data.heatmap || data.heatmap.length == 0) {
+                        return;
+                    }
+                    if (sondeHeatLayer) { historicalsonde.removeLayer(sondeHeatLayer); }
+                    sondeHeatLayer = L.heatLayer(data.heatmap, {
+                        radius: 10,
+                        blur: 15,
+                        minOpacity: 0.2,
+                        max: 3.0
+                    });
+                    historicalsonde.addLayer(sondeHeatLayer);
+                });
             }
 
             function showSondeLanding () {
@@ -833,6 +858,21 @@
                     mymap.invalidateSize();
                 }
                 setTimeout(showSondeCoverage, 500);
+                enableMenu();
+            });
+
+            $("#showsonde-heatmap").click(function(){
+                disableMenu();
+                if ((window.innerWidth/window.innerHeight) < 1) {
+                    var x = document.getElementById("closebtn");
+                    var y = document.getElementById('mapid');
+                    x.style.display = "none";
+                    y.style.display = "block";
+                    document.getElementById("mySidenav").style.width = 0;
+                    document.getElementById("main").style.marginLeft = 0;
+                    mymap.invalidateSize();
+                }
+                setTimeout(showSondeHeatmap, 500);
                 enableMenu();
             });
 
@@ -1502,6 +1542,7 @@
                 <button id="showsonde-mapquick" style="margin:3px auto">Plot Last RX</button>
                 <button id="showsonde-launches" style="margin:3px auto">Plot First RX</button>
                 <button id="showsonde-coverage" style="margin:3px auto">Plot Coverage</button>
+                <button id="showsonde-heatmap" style="margin:3px auto">Plot Heatmap</button>
                 <button id="showsonde-skew" style="margin:3px auto">Plot Skew-T</button>
                 <button id="download-logs" style="margin:3px auto">Download Logs</button>
                 <button id="generate-kml" style="margin:3px auto">Generate KML</button>
