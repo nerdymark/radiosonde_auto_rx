@@ -1,6 +1,14 @@
 ![auto_rx logo](autorx.png)
 # Automatic Radiosonde Receiver Utilities
 
+> [!NOTE]
+> **This is a personal fork** of [projecthorus/radiosonde_auto_rx](https://github.com/projecthorus/radiosonde_auto_rx),
+> customized for my own station (nerdscan integration, Bluesky/Caw notifications,
+> map coverage visualizations, and other station-specific tweaks on the
+> [`nerdscan`](../../tree/nerdscan) branch). **I am not accepting pull requests
+> or issues here.** If you're looking to run auto_rx yourself or contribute,
+> please head to the [upstream project](https://github.com/projecthorus/radiosonde_auto_rx).
+
 **Please refer to the [auto_rx wiki](https://github.com/projecthorus/radiosonde_auto_rx/wiki) for the latest information.**
 
 This project is built around [rs1279's RS](https://github.com/rs1729/RS) demodulators, and provides a set of utilities ('auto_rx') to allow automatic reception and uploading of [Radiosonde](https://en.wikipedia.org/wiki/Radiosonde) positions to multiple services, including:
