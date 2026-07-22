@@ -240,6 +240,130 @@ def list_log_files(quicklook=False, stats_fields=False, custom_log_dir=None):
     return _output
 
 
+# Cache for coverage_stats — digesting every log file is expensive, and the
+# result only changes when a log file changes. Keyed on (station position +
+# per-file (name, mtime, size)) so both config moves and new telemetry
+# invalidate it.
+_coverage_cache = {"key": None, "data": None}
+
+
+def coverage_stats(azimuth_bin_deg=5, heatmap_max_points=20000, custom_log_dir=None):
+    """ Digest ALL sonde log files into receiver-coverage visualisation data.
+
+    Returns a dict with:
+      - horizon: farthest received packet per azimuth bin (list of
+        {bearing, range_km, lat, lon, alt, serial}, sorted by bearing;
+        empty bins omitted) — the data-driven "range bubble" outline.
+      - max_range_km / max_range_point: overall best DX.
+      - heatmap: decimated [lat, lon] telemetry positions for a heat layer.
+      - flights / points: totals for display.
+    """
+    _station = (
+        autorx.config.global_config["station_lat"],
+        autorx.config.global_config["station_lon"],
+        autorx.config.global_config["station_alt"],
+    )
+    if _station[0] == 0.0 and _station[1] == 0.0:
+        return {"error": "Station position not set."}
+
+    if custom_log_dir:
+        _log_mask = os.path.join(custom_log_dir, "*_sonde.log")
+    else:
+        _log_mask = os.path.join(autorx.logging_path, "*_sonde.log")
+    _log_files = sorted(glob.glob(_log_mask))
+
+    _key = (_station[0], _station[1])
+    for _file in _log_files:
+        try:
+            _stat = os.stat(_file)
+            _key = _key + (_file, _stat.st_mtime, _stat.st_size)
+        except OSError:
+            continue
+    if _coverage_cache["key"] == _key:
+        return _coverage_cache["data"]
+
+    _bins = {}          # bin index -> best point dict in that azimuth bin
+    _heat = []
+    _total_points = 0
+    _flights = 0
+    _best = None
+
+    # Aim the heatmap decimation at a global point budget, split across files.
+    _budget_per_file = max(1, heatmap_max_points // max(1, len(_log_files)))
+
+    for _file in _log_files:
+        try:
+            _size = os.path.getsize(_file)
+            if _size < 140:
+                continue
+            _est_lines = max(1, _size // 140)
+            _heat_step = max(1, _est_lines // _budget_per_file)
+
+            _flight_counted = False
+            with open(_file, "r") as f:
+                _header = f.readline()
+                if "timestamp,serial,frame,lat,lon,alt" not in _header:
+                    continue
+                for _i, _line in enumerate(f):
+                    _fields = _line.split(",")
+                    if len(_fields) < 6:
+                        continue
+                    try:
+                        _lat = float(_fields[3])
+                        _lon = float(_fields[4])
+                        _alt = float(_fields[5])
+                    except ValueError:
+                        continue
+                    if _lat == 0.0 and _lon == 0.0:
+                        continue
+
+                    _pos = position_info(_station, (_lat, _lon, _alt))
+                    _range_km = _pos["great_circle_distance"] / 1000.0
+                    _bearing = _pos["bearing"]
+
+                    _total_points += 1
+                    _flight_counted = True
+
+                    _bin = int(_bearing // azimuth_bin_deg) % int(360 // azimuth_bin_deg)
+                    if (_bin not in _bins) or (_range_km > _bins[_bin]["range_km"]):
+                        _bins[_bin] = {
+                            "bearing": round(_bearing, 1),
+                            "range_km": round(_range_km, 1),
+                            "lat": _lat,
+                            "lon": _lon,
+                            "alt": int(_alt),
+                            "serial": strip_sonde_serial(_fields[1]),
+                        }
+                    # A new global best always beats its own bin's max, so the
+                    # dict we just stored in _bins IS this point.
+                    if (_best is None) or (_range_km > _best["range_km"]):
+                        _best = _bins[_bin]
+
+                    if _i % _heat_step == 0:
+                        _heat.append([round(_lat, 4), round(_lon, 4)])
+
+            if _flight_counted:
+                _flights += 1
+        except Exception as e:
+            logging.error(f"Coverage stats: could not digest {_file}: {str(e)}")
+            continue
+
+    _horizon = [_bins[_b] for _b in sorted(_bins.keys())]
+    _data = {
+        "station": {"lat": _station[0], "lon": _station[1]},
+        "flights": _flights,
+        "points": _total_points,
+        "azimuth_bin_deg": azimuth_bin_deg,
+        "max_range_km": (_best["range_km"] if _best else 0.0),
+        "max_range_point": _best,
+        "horizon": _horizon,
+        "heatmap": _heat,
+    }
+    _coverage_cache["key"] = _key
+    _coverage_cache["data"] = _data
+    return _data
+
+
 def read_log_file(filename, skewt_decimation=10):
     """ Read in a log file """
     logging.debug(f"Attempting to read file: {filename}")

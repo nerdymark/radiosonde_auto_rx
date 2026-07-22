@@ -27,6 +27,7 @@ from autorx.geometry import GenericTrack
 from autorx.utils import check_autorx_versions
 from autorx.log_files import (
     list_log_files,
+    coverage_stats,
     read_log_by_serial,
     zip_log_files,
     log_files_to_kml,
@@ -322,6 +323,14 @@ def shutdown_flask(shutdown_key):
 def flask_get_log_list():
     """ Return a list of log files, as a list of objects """
     return json.dumps(list_log_files(quicklook=True), separators=(',', ':'))
+
+
+@app.route("/get_coverage_stats")
+def flask_get_coverage_stats():
+    """ Digest of all sonde logs for map data-viz: per-bearing max-range
+    horizon, overall best DX, and a decimated position heatmap. Cached in
+    log_files, so repeat requests are cheap. """
+    return json.dumps(coverage_stats(), separators=(',', ':'))
 
 def flask_running():
     global flask_shutdown_key

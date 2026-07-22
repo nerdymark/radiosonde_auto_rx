@@ -68,3 +68,14 @@
 	border: 2px solid rgb(135, 135, 135);
 	border-radius: 4px;
 }
+
+/* Range-ring distance labels on the coverage map overlays */
+.range-ring-label {
+	color: #888888;
+	font-size: 10px;
+	font-weight: bold;
+	text-align: center;
+	text-shadow: 0 0 3px #ffffff, 0 0 3px #ffffff;
+	white-space: nowrap;
+	pointer-events: none;
+}
