@@ -6,6 +6,10 @@ var scan_chart_threshold;
 var scan_chart_obj;
 var scan_chart_latest_timestamp;
 var scan_chart_last_drawn = "none";
+// Current x-axis zoom domain ([min_mhz, max_mhz], null = unzoomed). Saved on
+// every zoom/pan so a redraw with fresh scan data can re-apply it — otherwise
+// each c3 .load() snaps the chart back to the full span.
+var scan_chart_zoom_domain = null;
 
 function setup_scan_chart(){
 	scan_chart_spectra = {
@@ -62,15 +66,18 @@ function setup_scan_chart(){
                 value: function (value) { return value + " dB"; }
             }
         },
+        zoom: {
+            enabled: true,      // mouse-wheel / pinch zoom + drag to pan
+            rescale: true,      // rescale the y axis to the visible data
+            onzoomend: function (domain) { scan_chart_zoom_domain = domain; }
+        },
 	    axis:{
 	        x:{
 	            tick:{
-                    values: [
-                        400, 400.5, 401, 401.5, 402, 402.5, 403,
-                        403.5, 404, 404.5, 405, 405.5, 406,
-                        1676, 1678, 1680, 1682, 1684, 1686, 1688,
-                        1690, 1692, 1694, 1696, 1698, 1700
-                    ],
+                    // Auto ticks (rather than a fixed value list) so labels
+                    // stay useful when zoomed in to a slice of the band.
+                    count: 13,
+                    format: function (x) { return String(+x.toFixed(3)); },
                     outer: false
 	            },
 	            label:"Frequency (MHz)"
@@ -87,6 +94,12 @@ function setup_scan_chart(){
 		},
 	    point:{r:10}
 	});
+
+	// Double-click resets the zoom to the full scan span.
+	document.getElementById('scan_chart').addEventListener('dblclick', function () {
+		scan_chart_zoom_domain = null;
+		scan_chart_obj.unzoom();
+	});
 }
 
 function redraw_scan_chart(){
@@ -99,6 +112,11 @@ function redraw_scan_chart(){
 	scan_chart_obj.load(scan_chart_spectra);
 	scan_chart_obj.load(scan_chart_peaks);
 	scan_chart_obj.load(scan_chart_threshold);
+
+	// Loading data resets the view; restore the user's zoom window.
+	if (scan_chart_zoom_domain) {
+		scan_chart_obj.zoom(scan_chart_zoom_domain);
+	}
 
 	scan_chart_last_drawn = scan_chart_latest_timestamp;
 
