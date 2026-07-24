@@ -605,6 +605,14 @@ quantization = 10000
 decoder_spacing_limit = 15000
 # Temporary Block Time (minutes) - How long to block encrypted or otherwise non-decodable sondes for.
 temporary_block_time = 120
+# Auto-block persistently failing peaks (nerdscan fork) - Temporarily block a ~10 kHz chunk of spectrum
+# after this many CONSECUTIVE failed sonde detections within it. Drifting spurs/birdies that sit above
+# the peak threshold otherwise cost detect_dwell_time on every scan pass, slowing the whole scan loop.
+# always_scan frequencies are never auto-blocked; a successful detection clears the count. 0 = disabled.
+auto_block_after = 0
+# How long (minutes) an auto-blocked chunk stays blocked. Keep this SHORT relative to temporary_block_time:
+# a real sonde appearing on a previously-spurious frequency is only invisible for this long.
+auto_block_time = 30
 # Maximum Async Scan Workers - When using KA9Q-radio, how many concurrent detection tasks to run.
 # This only applies when sdr_type = KA9Q. Ignored for RTLSDRs (which scan sequentially).
 # Valid range: 1-32. Automatically capped at CPU core count. Default is 4 (conservative).

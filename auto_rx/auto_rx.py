@@ -186,6 +186,8 @@ def start_scanner():
             wideband_sondes=config["wideband_sondes"],
             temporary_block_list=temporary_block_list,
             temporary_block_time=config["temporary_block_time"],
+            auto_block_after=config["auto_block_after"],
+            auto_block_time=config["auto_block_time"],
             max_async_scan_workers=config["max_async_scan_workers"],
         )
 

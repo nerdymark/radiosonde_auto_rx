@@ -714,6 +714,8 @@ class SondeScanner(object):
         save_detection_audio=False,
         temporary_block_list={},
         temporary_block_time=60,
+        auto_block_after=0,
+        auto_block_time=30,
         ngp_tweak=False,
         wideband_sondes=False,
         max_async_scan_workers=4
@@ -765,6 +767,12 @@ class SondeScanner(object):
             save_detection_audio (bool): Save the audio used in each detecton to detect_<device_idx>.wav
             temporary_block_list (dict): A dictionary where each attribute represents a frequency that should be blocked for a set time.
             temporary_block_time (int): How long (minutes) frequencies in the temporary block list should remain blocked for.
+            auto_block_after (int): Temporarily block a ~10 kHz bucket of spectrum after this many CONSECUTIVE failed
+                sonde detections within it (drifting spurs/birdies otherwise eat detect_dwell_time every scan pass).
+                0 = disabled. always_scan frequencies are exempt, a successful detection clears the count, and the
+                feature is inactive in only_scan mode. Sequential (RTLSDR/SpyServer) scanning only.
+            auto_block_time (int): How long (minutes) an auto-blocked bucket stays blocked. Kept shorter than
+                temporary_block_time so a real sonde appearing on a previously-spurious frequency isn't lost for long.
             ngp_tweak (bool): Narrow the detection filter when searching for 1680 MHz sondes, to enhance detection of RS92-NGPs.
             wideband_sondes (bool): Use a wider detection filter to allow detection of Weathex and wideband iMet sondes.
         """
@@ -813,6 +821,12 @@ class SondeScanner(object):
         self.temporary_block_list = temporary_block_list.copy()
         self.temporary_block_list_lock = Lock()
         self.temporary_block_time = temporary_block_time
+        self.auto_block_after = auto_block_after
+        self.auto_block_time = auto_block_time
+        # Consecutive failed-detection counts, keyed by 10 kHz frequency bucket
+        # (Hz). Bucketed rather than exact so a spur drifting a few kHz between
+        # scan passes still accumulates towards an auto-block.
+        self.failed_detect_counts = {}
 
         # Alert the user if there are temporary blocks in place.
         if len(self.temporary_block_list.keys()) > 0:
@@ -1251,6 +1265,10 @@ class SondeScanner(object):
                 )
 
                 if detected != None:
+                    # A real detection here clears any accumulated failed-detect
+                    # count for this part of the spectrum.
+                    self.failed_detect_counts.pop(self._freq_bucket(_freq), None)
+
                     # Quantize the detected frequency (with offset) to 1 kHz
                     _freq = round((_freq + offset_est) / 1000.0) * 1000.0
 
@@ -1264,6 +1282,10 @@ class SondeScanner(object):
                         return _search_results
 
                     # Otherwise, we continue....
+                else:
+                    # No sonde found on this peak - remember the failure, and
+                    # auto-block the frequency bucket if it keeps happening.
+                    self._note_failed_detect(_freq)
 
         if len(_search_results) == 0:
             self.log_debug("No sondes detected.")
@@ -1310,6 +1332,54 @@ class SondeScanner(object):
     def running(self):
         """Check if the scanner is running"""
         return self.sonde_scanner_running
+
+    def _freq_bucket(self, frequency):
+        """ Round a frequency (Hz) to the 10 kHz bucket used for failed-detection tracking. """
+        return round(frequency / 10000.0) * 10000.0
+
+    def _note_failed_detect(self, frequency):
+        """ Record a failed sonde detection on a scan peak, and temporarily
+        auto-block its 10 kHz spectrum bucket once auto_block_after consecutive
+        failures accumulate there. Drifting spurs/birdies that sit above the
+        peak-detection threshold otherwise cost detect_dwell_time on EVERY scan
+        pass, slowing the whole scan loop down.
+
+        always_scan frequencies are never auto-blocked (they are expected to
+        fail detection on almost every pass), and the feature is inactive in
+        only_scan mode.
+
+        Args:
+            frequency (float): Frequency the detection failed on, in Hz
+        """
+        if self.auto_block_after <= 0 or len(self.only_scan) > 0:
+            return
+
+        # Never auto-block an always_scan frequency.
+        for _always in self.always_scan:
+            if abs(frequency - _always * 1e6) < (self.quantization / 2.0):
+                return
+
+        _bucket = self._freq_bucket(frequency)
+        _fails = self.failed_detect_counts.get(_bucket, 0) + 1
+        self.failed_detect_counts[_bucket] = _fails
+
+        if _fails < self.auto_block_after:
+            return
+
+        # Block the whole bucket: entries every 1 kHz across bucket +/- 5 kHz,
+        # since the block-list match radius is only quantization/2. Entries are
+        # backdated so they expire after auto_block_time minutes rather than
+        # the (longer) temporary_block_time the shared expiry logic uses.
+        _stamp = time.time() - (self.temporary_block_time - self.auto_block_time) * 60.0
+        self.temporary_block_list_lock.acquire()
+        for _offset_khz in range(-5, 6):
+            self.temporary_block_list[_bucket + _offset_khz * 1000.0] = _stamp
+        self.temporary_block_list_lock.release()
+        self.failed_detect_counts.pop(_bucket, None)
+        self.log_info(
+            "Auto-blocked %.3f MHz (+/- 5 kHz) for %d minutes after %d consecutive failed detections."
+            % (_bucket / 1e6, self.auto_block_time, self.auto_block_after)
+        )
 
     def add_temporary_block(self, frequency):
         """Add a frequency to the temporary block list.
