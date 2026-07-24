@@ -155,7 +155,8 @@ class SondeDecoder(object):
         experimental_decoder=False,
         save_raw_hex=False,
         wideband_sondes=False,
-        close_on_encrypted=True
+        close_on_encrypted=True,
+        abandon_after_burst=0
     ):
         """ Initialise and start a Sonde Decoder.
 
@@ -196,6 +197,10 @@ class SondeDecoder(object):
             save_raw_hex (bool): If True, save the raw hex output from the decoder to a file.
             wideband_sondes (bool): If True, use a wider bandwidth for iMet sondes. Does not affect settings for any other radiosonde types.
             close_on_encrypted (bool): If True, close the decoder when an encrypted sonde is detected, resulting in the frequency being locked out.
+            abandon_after_burst (int): If >0, close the decoder this many seconds after the sonde is confirmed to have
+                burst (descending well below its peak altitude), so the SDR can re-scan for OTHER sondes still aloft.
+                The frequency is temporarily blocked on exit (exit_state "BurstAbandon" -> burst_block_time minutes),
+                so the same descending sonde isn't immediately re-acquired. 0 = disabled (track until signal lost).
                     If False, we continue to pass data through the processing chain, but with different behaviour (e.g. no sondehub upload)
         """
         # Thread running flag
@@ -231,6 +236,13 @@ class SondeDecoder(object):
         self.raw_file = None
         self.wideband_sondes = wideband_sondes
         self.close_on_encrypted = close_on_encrypted
+        self.abandon_after_burst = abandon_after_burst
+
+        # Post-burst abandon state: track the peak altitude seen, count frames
+        # observed well below it, and remember when burst was confirmed.
+        self.max_altitude_seen = 0.0
+        self.burst_descent_frames = 0
+        self.burst_detected_time = None
 
         # Last decoded position of this sonde
         self.last_positions = {}
@@ -1933,6 +1945,48 @@ class SondeDecoder(object):
                     f"Couldn't generate APRS ID for {_telemetry['id']}"
                 )
                 _telemetry["aprsid"] = None
+
+            # Post-burst abandon: once the sonde is confirmed descending, give it
+            # abandon_after_burst more seconds of tracking (enough for burst
+            # notifications to fire), then close the decoder so the SDR can
+            # re-scan for other sondes still aloft. clean_task_list turns the
+            # "BurstAbandon" exit state into a burst_block_time-minute lockout
+            # of this frequency.
+            if (self.abandon_after_burst > 0) and data_not_encrypted:
+                try:
+                    _alt = float(_telemetry["alt"])
+                    if _alt > self.max_altitude_seen:
+                        self.max_altitude_seen = _alt
+                        self.burst_descent_frames = 0
+                    elif (self.max_altitude_seen > 5000.0) and (
+                        _alt < (self.max_altitude_seen - 250.0)
+                    ):
+                        # Only consider a burst if the sonde got above 5 km, and
+                        # require 250 m below peak for 10 frames so GPS altitude
+                        # noise can't fake a descent.
+                        self.burst_descent_frames += 1
+
+                    if (self.burst_detected_time is None) and (
+                        self.burst_descent_frames >= 10
+                    ):
+                        self.burst_detected_time = time.time()
+                        self.log_info(
+                            "Radiosonde %s has burst (peak altitude %d m). Abandoning it in %d seconds to re-scan for other sondes."
+                            % (_telemetry["id"], int(self.max_altitude_seen), self.abandon_after_burst)
+                        )
+
+                    if (self.burst_detected_time is not None) and (
+                        (time.time() - self.burst_detected_time) > self.abandon_after_burst
+                    ):
+                        self.log_info(
+                            "Radiosonde %s is descending (%d m) - closing decoder to re-scan for other sondes."
+                            % (_telemetry["id"], int(_alt))
+                        )
+                        self.exit_state = "BurstAbandon"
+                        self.decoder_running = False
+                        return False
+                except (KeyError, ValueError, TypeError):
+                    pass
 
             # If we have been provided a telemetry filter function, pass the telemetry data
             # through the filter, and return the response

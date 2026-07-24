@@ -298,7 +298,8 @@ def start_decoder(freq, sonde_type, continuous=False):
             experimental_decoder=config["experimental_decoders"][_exp_sonde_type],
             save_raw_hex=config["save_raw_hex"],
             wideband_sondes=config["wideband_sondes"],
-            close_on_encrypted=config["close_on_encrypted"]
+            close_on_encrypted=config["close_on_encrypted"],
+            abandon_after_burst=config["abandon_after_burst"]
         )
         autorx.sdr_list[_device_idx]["task"] = autorx.task_list[freq]["task"]
 
@@ -453,6 +454,24 @@ def clean_task_list():
                 # If there is a scanner currently running, add it to the scanners internal block list.
                 if "SCAN" in autorx.task_list:
                     autorx.task_list["SCAN"]["task"].add_temporary_block(_key)
+
+            if _exit_state == "BurstAbandon":
+                # This decoder abandoned a burst/descending sonde so the SDR can
+                # re-scan for other sondes still aloft. Block its frequency for
+                # burst_block_time minutes (backdated stamp - the shared expiry
+                # logic always uses temporary_block_time) so the same descending
+                # sonde isn't immediately re-acquired.
+                logging.info(
+                    "Task Manager - Abandoned descending sonde on %.3f MHz - blocking frequency for %d minutes and re-scanning."
+                    % (_key / 1e6, config["burst_block_time"])
+                )
+                temporary_block_list[_key] = time.time() - (
+                    (config["temporary_block_time"] - config["burst_block_time"]) * 60.0
+                )
+                if "SCAN" in autorx.task_list:
+                    autorx.task_list["SCAN"]["task"].add_temporary_block(
+                        _key, block_time_min=config["burst_block_time"]
+                    )
 
             if _exit_state == "FAILED SDR":
                 # The SDR was not able to be recovered after many (usually 5) attempts.

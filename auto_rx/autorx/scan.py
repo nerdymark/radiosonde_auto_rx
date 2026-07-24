@@ -1381,16 +1381,24 @@ class SondeScanner(object):
             % (_bucket / 1e6, self.auto_block_time, self.auto_block_after)
         )
 
-    def add_temporary_block(self, frequency):
+    def add_temporary_block(self, frequency, block_time_min=None):
         """Add a frequency to the temporary block list.
 
         Args:
             frequency (float): Frequency to be blocked, in Hz
+            block_time_min (int): Optional override of how long (minutes) to block for.
+                Entries are backdated so the shared expiry logic (which always uses
+                temporary_block_time) releases them after this many minutes instead.
+                None = the full temporary_block_time.
         """
+        if block_time_min is None:
+            _stamp = time.time()
+        else:
+            _stamp = time.time() - (self.temporary_block_time - block_time_min) * 60.0
         # Acquire a lock on the block list, so we don't accidentally modify it
         # while it is being used in a scan.
         self.temporary_block_list_lock.acquire()
-        self.temporary_block_list[frequency] = time.time()
+        self.temporary_block_list[frequency] = _stamp
         self.temporary_block_list_lock.release()
         self.log_info(
             "Adding temporary block for frequency %.3f MHz." % (frequency / 1e6)

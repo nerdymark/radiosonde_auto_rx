@@ -137,6 +137,8 @@ def read_auto_rx_config(filename, no_sdr_test=False):
         "dft_detect_threshold": 0.0,
         "auto_block_after": 0,
         "auto_block_time": 30,
+        "abandon_after_burst": 0,
+        "burst_block_time": 30,
         "scan_delay": 10,
         "payload_id_valid": 5,
         "temporary_block_time": 60,
@@ -853,6 +855,26 @@ def read_auto_rx_config(filename, no_sdr_test=False):
                 "Config - Missing auto_block_time option, using default (30 minutes)"
             )
             auto_rx_config["auto_block_time"] = 30
+
+        # nerdscan fork - abandon burst/descending sondes to re-scan for others still aloft
+        try:
+            auto_rx_config["abandon_after_burst"] = config.getint(
+                "advanced", "abandon_after_burst"
+            )
+        except:
+            logging.debug(
+                "Config - Missing abandon_after_burst option, using default (0 = track until signal lost)"
+            )
+            auto_rx_config["abandon_after_burst"] = 0
+        try:
+            auto_rx_config["burst_block_time"] = config.getint(
+                "advanced", "burst_block_time"
+            )
+        except:
+            logging.debug(
+                "Config - Missing burst_block_time option, using default (30 minutes)"
+            )
+            auto_rx_config["burst_block_time"] = 30
 
         # nerdscan fork - Bluesky (atproto) notification settings
         try:

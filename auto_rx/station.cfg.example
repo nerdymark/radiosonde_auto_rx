@@ -613,6 +613,14 @@ auto_block_after = 0
 # How long (minutes) an auto-blocked chunk stays blocked. Keep this SHORT relative to temporary_block_time:
 # a real sonde appearing on a previously-spurious frequency is only invisible for this long.
 auto_block_time = 30
+# Abandon burst sondes (nerdscan fork) - If >0, close the decoder this many seconds after a sonde is
+# confirmed to have burst (10 frames observed >250 m below its >5 km peak altitude), then temporarily
+# block its frequency and RE-SCAN. With a single SDR, riding a descending sonde all the way down means
+# missing any OTHER sondes still aloft. 0 = disabled (track until signal lost, upstream behaviour).
+abandon_after_burst = 0
+# How long (minutes) an abandoned sonde's frequency stays blocked. After this the sonde can be
+# re-acquired if it's still transmitting and nothing else is being tracked.
+burst_block_time = 30
 # Maximum Async Scan Workers - When using KA9Q-radio, how many concurrent detection tasks to run.
 # This only applies when sdr_type = KA9Q. Ignored for RTLSDRs (which scan sequentially).
 # Valid range: 1-32. Automatically capped at CPU core count. Default is 4 (conservative).
