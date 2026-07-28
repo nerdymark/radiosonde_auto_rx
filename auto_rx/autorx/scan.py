@@ -1489,6 +1489,10 @@ class SondeScanner(object):
             self.log_warning("SondeHub hint parse failed - %s" % str(e))
             return
 
+        self.log_debug(
+            "SondeHub hints - query returned %d sonde(s), %d usable."
+            % (len(_entries), len(_hints))
+        )
         if _hints != self.sondehub_hints:
             if _hints:
                 self.log_info(
