@@ -13,6 +13,7 @@ import numpy as np
 import os
 import sys
 import platform
+import requests
 import subprocess
 import time
 import traceback
@@ -687,6 +688,11 @@ class SondeScanner(object):
         only_scan=[],
         always_scan=[],
         always_scan_interval=0,
+        sondehub_hint_distance=0.0,
+        sondehub_hint_interval=600,
+        sondehub_hint_max_age=60,
+        station_lat=0.0,
+        station_lon=0.0,
         never_scan=[],
         snr_threshold=10,
         min_distance=1000,
@@ -738,6 +744,15 @@ class SondeScanner(object):
                 known launch frequency mid-pass is caught without waiting out the rest of the peak list.
                 0 = disabled (stock behaviour: always_scan is checked once, at the start of each pass).
                 Sequential (RTLSDR/SpyServer) scanning only; ignored in only_scan mode.
+            sondehub_hint_distance (float): If > 0, periodically query the SondeHub API for sondes
+                currently aloft within this many km of the station, and treat their reported transmit
+                frequencies as priority channels (like always_scan: scanned first, interleaved mid-pass,
+                never auto-blocked) while their telemetry stays fresh. 0 = disabled.
+            sondehub_hint_interval (int): Seconds between SondeHub hint queries (default 600 - one
+                gentle GET every 10 minutes; queries only run while the scanner is actually scanning).
+            sondehub_hint_max_age (int): Only hint on sondes with telemetry newer than this many minutes.
+            station_lat (float): Station latitude, used for the SondeHub hint query.
+            station_lon (float): Station longitude, used for the SondeHub hint query.
             never_scan (list): If provided, remove these frequencies from the detected peaks before scanning.
             snr_threshold (float): SNR to threshold detections at. (dB)
             min_distance (float): Minimum allowable distance between detected peaks, in Hz.
@@ -794,6 +809,14 @@ class SondeScanner(object):
         self.only_scan = only_scan
         self.always_scan = always_scan
         self.always_scan_interval = always_scan_interval
+        self.sondehub_hint_distance = sondehub_hint_distance
+        self.sondehub_hint_interval = sondehub_hint_interval
+        self.sondehub_hint_max_age = sondehub_hint_max_age
+        self.station_lat = station_lat
+        self.station_lon = station_lon
+        # Live SondeHub hint frequencies (MHz), refreshed by _update_sondehub_hints.
+        self.sondehub_hints = []
+        self.sondehub_hints_last_query = 0.0
         self.never_scan = never_scan
         self.snr_threshold = snr_threshold
         self.min_distance = min_distance
@@ -932,6 +955,9 @@ class SondeScanner(object):
                         )
                         break
 
+            # Refresh SondeHub nearby-sonde hints (rate-limited; no-op if disabled).
+            self._update_sondehub_hints()
+
             try:
                 _results = self.sonde_search()
 
@@ -1062,8 +1088,9 @@ class SondeScanner(object):
                 show=False,
             )
 
-            # If we have found no peaks, and no always_scan list has been provided, re-scan.
-            if (len(peak_indices) == 0) and (len(self.always_scan) == 0):
+            # If we have found no peaks, and no priority (always_scan/SondeHub
+            # hint) frequencies are staged, re-scan.
+            if (len(peak_indices) == 0) and (len(self._priority_frequencies()) == 0):
                 self.log_debug("No peaks found.")
                 # Emit a notification to the client that a scan is complete.
                 flask_emit_event("scan_event")
@@ -1105,9 +1132,10 @@ class SondeScanner(object):
             if len(peak_frequencies) > self.max_peaks:
                 peak_frequencies = peak_frequencies[: self.max_peaks]
 
-            # Append on any frequencies in the supplied always_scan list
+            # Append on any priority frequencies (the supplied always_scan list
+            # plus any live SondeHub hints).
             peak_frequencies = np.append(
-                np.array(self.always_scan) * 1e6, peak_frequencies
+                np.array(self._priority_frequencies()) * 1e6, peak_frequencies
             )
 
             # Remove any frequencies in the temporary block list
@@ -1251,12 +1279,13 @@ class SondeScanner(object):
             # appearing on a known launch channel mid-pass gets a detection attempt
             # within ~N dwells instead of waiting out the whole peak list (a
             # resonant antenna can put dozens of spur peaks ahead of it).
+            _priority_mhz = self._priority_frequencies()
             if (
                 self.always_scan_interval > 0
-                and len(self.always_scan) > 0
+                and len(_priority_mhz) > 0
                 and len(self.only_scan) == 0
             ):
-                _priority = list(np.array(self.always_scan) * 1e6)
+                _priority = list(np.array(_priority_mhz) * 1e6)
                 # Everything that isn't (a duplicate of) a priority channel. This
                 # also drops the head-of-pass always_scan copies appended above —
                 # the interleaved order re-adds them at the front.
@@ -1374,6 +1403,104 @@ class SondeScanner(object):
         """Check if the scanner is running"""
         return self.sonde_scanner_running
 
+    def _priority_frequencies(self):
+        """The always_scan list plus any live SondeHub hints (MHz), with hints
+        that duplicate an always_scan channel (within quantization/2) removed."""
+        _prio = list(self.always_scan)
+        for _hint in self.sondehub_hints:
+            if all(
+                abs(_hint - _f) * 1e6 > (self.quantization / 2.0) for _f in _prio
+            ):
+                _prio.append(_hint)
+        return _prio
+
+    def _update_sondehub_hints(self):
+        """Query SondeHub for sondes currently aloft within
+        sondehub_hint_distance km of the station, and stage their reported
+        transmit frequencies as priority scan channels (treated like
+        always_scan: scanned first, interleaved mid-pass, never auto-blocked).
+
+        The query is deliberately gentle on the SondeHub API: a single GET at
+        most every sondehub_hint_interval seconds, issued only from the scan
+        loop (so nothing is queried while a sonde is being decoded or the
+        scanner is stopped), and a failed query just keeps the previous hints.
+        """
+        if self.sondehub_hint_distance <= 0 or (
+            self.station_lat == 0.0 and self.station_lon == 0.0
+        ):
+            return
+        _now = time.time()
+        if (_now - self.sondehub_hints_last_query) < self.sondehub_hint_interval:
+            return
+        # Stamp before the request, so a failing API is retried no faster than
+        # the configured interval either.
+        self.sondehub_hints_last_query = _now
+
+        try:
+            _r = requests.get(
+                "https://api.v2.sondehub.org/sondes",
+                params={
+                    "lat": self.station_lat,
+                    "lon": self.station_lon,
+                    "distance": int(self.sondehub_hint_distance * 1000),
+                    "last": int(self.sondehub_hint_max_age * 60),
+                },
+                headers={
+                    "User-Agent": "radiosonde_auto_rx (nerdscan fork; sondehub scan hints)"
+                },
+                timeout=20,
+            )
+            _r.raise_for_status()
+            _sondes = _r.json()
+        except Exception as e:
+            self.log_warning("SondeHub hint query failed - %s" % str(e))
+            return
+
+        _hints = []
+        _info = []
+        try:
+            _entries = (
+                list(_sondes.values()) if isinstance(_sondes, dict) else list(_sondes)
+            )
+            # Freshest telemetry first, so the hint cap keeps the sondes most
+            # likely to still be transmitting.
+            _entries.sort(key=lambda _e: str(_e.get("datetime", "")), reverse=True)
+            for _entry in _entries:
+                if len(_hints) >= 5:
+                    # Bound the added detect-dwell cost per scan pass.
+                    break
+                try:
+                    _freq = round(float(_entry.get("frequency")), 3)
+                except (TypeError, ValueError):
+                    continue
+                if not (self.min_freq <= _freq <= self.max_freq):
+                    continue
+                if any(
+                    abs(_freq - _f) * 1e6 <= (self.quantization / 2.0)
+                    for _f in _hints
+                ):
+                    continue
+                _hints.append(_freq)
+                _info.append(
+                    "%.3f MHz (%s %s)"
+                    % (_freq, _entry.get("type", "?"), _entry.get("serial", "?"))
+                )
+        except Exception as e:
+            self.log_warning("SondeHub hint parse failed - %s" % str(e))
+            return
+
+        if _hints != self.sondehub_hints:
+            if _hints:
+                self.log_info(
+                    "SondeHub hints - %d sonde(s) aloft within %.0f km, prioritising: %s"
+                    % (len(_hints), self.sondehub_hint_distance, ", ".join(_info))
+                )
+            else:
+                self.log_info(
+                    "SondeHub hints - no sondes aloft nearby, hints cleared."
+                )
+        self.sondehub_hints = _hints
+
     def _freq_bucket(self, frequency):
         """ Round a frequency (Hz) to the 10 kHz bucket used for failed-detection tracking. """
         return round(frequency / 10000.0) * 10000.0
@@ -1395,8 +1522,8 @@ class SondeScanner(object):
         if self.auto_block_after <= 0 or len(self.only_scan) > 0:
             return
 
-        # Never auto-block an always_scan frequency.
-        for _always in self.always_scan:
+        # Never auto-block a priority (always_scan / SondeHub hint) frequency.
+        for _always in self._priority_frequencies():
             if abs(frequency - _always * 1e6) < (self.quantization / 2.0):
                 return
 

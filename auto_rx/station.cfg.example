@@ -136,6 +136,15 @@ always_scan = []
 # 0 = disabled (stock behaviour). Sequential (RTLSDR/SpyServer) scanning only.
 always_scan_interval = 0
 
+# sondehub_hint_distance - (nerdscan fork) If > 0, gently query the SondeHub API (one GET every
+# sondehub_hint_interval seconds, only while scanning) for sondes currently aloft within this many
+# km of the station, and treat their reported frequencies as priority channels — scanned first,
+# re-checked mid-pass per always_scan_interval, and never auto-blocked — while their telemetry is
+# fresher than sondehub_hint_max_age minutes. Needs station_lat/station_lon set. 0 = disabled.
+sondehub_hint_distance = 0
+sondehub_hint_interval = 600
+sondehub_hint_max_age = 60
+
 # always_decode - Always-running decoders. Only possible in a multi-SDR (or network-based SDR) system.
 # List must be in the form: [[401.5,"RS41"], [402.5,"DFM"], [400.5,"M10"], [400.5,"IMET"]]
 # Valid sonde types: RS41, RS92, DFM, M10, M20, IMET, IMETWIDE, IMET5, MK2LMS, LMS6, MEISEI, MRZ, MTS01

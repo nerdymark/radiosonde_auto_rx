@@ -81,6 +81,9 @@ def read_auto_rx_config(filename, no_sdr_test=False):
         "never_scan": [],
         "always_scan": [],
         "always_scan_interval": 0,
+        "sondehub_hint_distance": 0.0,
+        "sondehub_hint_interval": 600,
+        "sondehub_hint_max_age": 60,
         "always_decode": [],
         # Location Settings
         "station_lat": 0.0,
@@ -293,6 +296,35 @@ def read_auto_rx_config(filename, no_sdr_test=False):
                 "Config - Missing always_scan_interval option, using default (0 = head-of-pass only)"
             )
             auto_rx_config["always_scan_interval"] = 0
+
+        # nerdscan fork - SondeHub nearby-sonde frequency hints
+        try:
+            auto_rx_config["sondehub_hint_distance"] = config.getfloat(
+                "search_params", "sondehub_hint_distance"
+            )
+        except:
+            logging.debug(
+                "Config - Missing sondehub_hint_distance option, using default (0 = disabled)"
+            )
+            auto_rx_config["sondehub_hint_distance"] = 0.0
+        try:
+            auto_rx_config["sondehub_hint_interval"] = config.getint(
+                "search_params", "sondehub_hint_interval"
+            )
+        except:
+            logging.debug(
+                "Config - Missing sondehub_hint_interval option, using default (600 s)"
+            )
+            auto_rx_config["sondehub_hint_interval"] = 600
+        try:
+            auto_rx_config["sondehub_hint_max_age"] = config.getint(
+                "search_params", "sondehub_hint_max_age"
+            )
+        except:
+            logging.debug(
+                "Config - Missing sondehub_hint_max_age option, using default (60 minutes)"
+            )
+            auto_rx_config["sondehub_hint_max_age"] = 60
 
         # Location Settings
         auto_rx_config["station_lat"] = config.getfloat("location", "station_lat")
