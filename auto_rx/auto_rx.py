@@ -160,6 +160,7 @@ def start_scanner():
             search_step=config["search_step"],
             only_scan=config["only_scan"],
             always_scan=config["always_scan"],
+            always_scan_interval=config["always_scan_interval"],
             never_scan=config["never_scan"],
             snr_threshold=config["snr_threshold"],
             min_distance=config["min_distance"],

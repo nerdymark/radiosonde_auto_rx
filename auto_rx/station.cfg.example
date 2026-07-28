@@ -129,6 +129,13 @@ never_scan = []
 # This is useful when you know the regular frequency of a local sonde, but still want to allow detections on other frequencies.
 always_scan = []
 
+# always_scan_interval - (nerdscan fork) Re-check the always_scan frequencies after every N other
+# candidate peaks during a scan pass, instead of only once at the start. Known launch frequencies
+# then get detection attempts several times more often than discovered spurs — useful when a
+# resonant antenna fills the peak list with birdies ahead of the real channel.
+# 0 = disabled (stock behaviour). Sequential (RTLSDR/SpyServer) scanning only.
+always_scan_interval = 0
+
 # always_decode - Always-running decoders. Only possible in a multi-SDR (or network-based SDR) system.
 # List must be in the form: [[401.5,"RS41"], [402.5,"DFM"], [400.5,"M10"], [400.5,"IMET"]]
 # Valid sonde types: RS41, RS92, DFM, M10, M20, IMET, IMETWIDE, IMET5, MK2LMS, LMS6, MEISEI, MRZ, MTS01

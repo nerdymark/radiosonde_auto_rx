@@ -686,6 +686,7 @@ class SondeScanner(object):
         search_step=800.0,
         only_scan=[],
         always_scan=[],
+        always_scan_interval=0,
         never_scan=[],
         snr_threshold=10,
         min_distance=1000,
@@ -732,6 +733,11 @@ class SondeScanner(object):
             search_step (float): Search step, in *Hz*. Defaults to 800 Hz, which seems to work well.
             only_scan (list): If provided, *only* scan on these frequencies. Frequencies provided as a list in MHz.
             always_scan (list): If provided, add these frequencies to the start of each scan attempt.
+            always_scan_interval (int): Re-check the always_scan frequencies after every N other candidate
+                peaks during a scan pass (in addition to the head-of-pass check), so a sonde appearing on a
+                known launch frequency mid-pass is caught without waiting out the rest of the peak list.
+                0 = disabled (stock behaviour: always_scan is checked once, at the start of each pass).
+                Sequential (RTLSDR/SpyServer) scanning only; ignored in only_scan mode.
             never_scan (list): If provided, remove these frequencies from the detected peaks before scanning.
             snr_threshold (float): SNR to threshold detections at. (dB)
             min_distance (float): Minimum allowable distance between detected peaks, in Hz.
@@ -787,6 +793,7 @@ class SondeScanner(object):
         self.search_step = search_step
         self.only_scan = only_scan
         self.always_scan = always_scan
+        self.always_scan_interval = always_scan_interval
         self.never_scan = never_scan
         self.snr_threshold = snr_threshold
         self.min_distance = min_distance
@@ -1239,6 +1246,40 @@ class SondeScanner(object):
 
         # Standard sequential scanning (for RTLSDR, SpyServer, single peaks, or async fallback)
         if not _use_async_scanning:
+            # Priority interleave: with always_scan_interval = N > 0, re-insert the
+            # always_scan frequencies after every N other candidates, so a sonde
+            # appearing on a known launch channel mid-pass gets a detection attempt
+            # within ~N dwells instead of waiting out the whole peak list (a
+            # resonant antenna can put dozens of spur peaks ahead of it).
+            if (
+                self.always_scan_interval > 0
+                and len(self.always_scan) > 0
+                and len(self.only_scan) == 0
+            ):
+                _priority = list(np.array(self.always_scan) * 1e6)
+                # Everything that isn't (a duplicate of) a priority channel. This
+                # also drops the head-of-pass always_scan copies appended above —
+                # the interleaved order re-adds them at the front.
+                _others = [
+                    float(_f)
+                    for _f in peak_frequencies
+                    if min(abs(_f - _p) for _p in _priority)
+                    > (self.quantization / 2.0)
+                ]
+                _order = []
+                for _i in range(0, max(len(_others), 1), self.always_scan_interval):
+                    _order.extend(_priority)
+                    _order.extend(_others[_i : _i + self.always_scan_interval])
+                peak_frequencies = np.array(_order)
+                if len(_others) > self.always_scan_interval:
+                    self.log_debug(
+                        "Priority interleave: re-checking always_scan every %d candidates (%d checks this pass)."
+                        % (
+                            self.always_scan_interval,
+                            math.ceil(len(_others) / self.always_scan_interval),
+                        )
+                    )
+
             for freq in peak_frequencies:
 
                 _freq = float(freq)

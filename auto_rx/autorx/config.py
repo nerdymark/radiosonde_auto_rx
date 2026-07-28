@@ -80,6 +80,7 @@ def read_auto_rx_config(filename, no_sdr_test=False):
         "only_scan": [],
         "never_scan": [],
         "always_scan": [],
+        "always_scan_interval": 0,
         "always_decode": [],
         # Location Settings
         "station_lat": 0.0,
@@ -281,6 +282,17 @@ def read_auto_rx_config(filename, no_sdr_test=False):
             auto_rx_config["always_scan"] = json.loads(
                 config.get("search_params", "greylist")
             )
+
+        # nerdscan fork - re-check always_scan (priority) frequencies mid-pass
+        try:
+            auto_rx_config["always_scan_interval"] = config.getint(
+                "search_params", "always_scan_interval"
+            )
+        except:
+            logging.debug(
+                "Config - Missing always_scan_interval option, using default (0 = head-of-pass only)"
+            )
+            auto_rx_config["always_scan_interval"] = 0
 
         # Location Settings
         auto_rx_config["station_lat"] = config.getfloat("location", "station_lat")
