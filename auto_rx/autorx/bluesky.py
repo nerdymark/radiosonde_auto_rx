@@ -116,8 +116,92 @@ def _fit_track(points, budget):
     return None
 
 
-def _ft(alt_m):
-    return "{:,}".format(int(alt_m * 3.28084))
+def _m(alt_m):
+    """Altitude as metric metres, e.g. '26,500 m'. This is science."""
+    return "{:,} m".format(int(round(alt_m)))
+
+
+def _km(m):
+    return "%.1f km" % (m / 1000.0)
+
+
+# OpenStreetMap Nominatim reverse geocoder, used to name a landing point
+# ("near Safeway, Garden Grove") instead of posting bare coordinates. Public
+# instance: max ~1 req/s and a genuine identifying User-Agent are required by
+# its usage policy - we call it at most once per event (minutes apart), so we
+# stay well within that.
+NOMINATIM_URL = "https://nominatim.openstreetmap.org/reverse"
+GEOCODE_UA = "radiosonde_auto_rx-nerdscan/1.0 (+https://nerdymark.com)"
+GEOCODE_TIMEOUT = 10
+
+
+def _place_label(lat, lon):
+    """A short human place name for a point, e.g. 'Safeway, Garden Grove',
+    '1234 Garden Grove Blvd, Anaheim', 'Fremont', or 'Farallon Islands'.
+    Returns None on any failure or over featureless water - callers must
+    treat it as best-effort and never block an alert on it."""
+    try:
+        _r = requests.get(
+            NOMINATIM_URL,
+            params={
+                "lat": "%.5f" % lat,
+                "lon": "%.5f" % lon,
+                "format": "jsonv2",
+                "zoom": 16,  # building/street level, but still names hamlets
+                "addressdetails": 1,
+            },
+            headers={"User-Agent": GEOCODE_UA},
+            timeout=GEOCODE_TIMEOUT,
+        )
+        _r.raise_for_status()
+        _data = _r.json()
+    except Exception as e:
+        logging.debug("Bluesky - reverse geocode failed - %s" % str(e))
+        return None
+    if not _data or "error" in _data:
+        return None
+
+    _addr = _data.get("address", {}) or {}
+    # A named point-of-interest reads best ("near Safeway"); fall back through
+    # street address, then locality, then coarse admin area.
+    _poi = (
+        _data.get("name")
+        or _addr.get("amenity")
+        or _addr.get("shop")
+        or _addr.get("building")
+        or _addr.get("leisure")
+        or _addr.get("tourism")
+        or _addr.get("natural")
+        or _addr.get("aeroway")
+        or _addr.get("man_made")
+    )
+    _road = _addr.get("road")
+    _house = _addr.get("house_number")
+    _locality = (
+        _addr.get("city")
+        or _addr.get("town")
+        or _addr.get("village")
+        or _addr.get("hamlet")
+        or _addr.get("suburb")
+        or _addr.get("neighbourhood")
+        or _addr.get("municipality")
+        or _addr.get("county")
+    )
+    _parts = []
+    if _poi:
+        _parts.append(_poi)
+    elif _road:
+        _parts.append("%s %s" % (_house, _road) if _house else _road)
+    if _locality and _locality not in _parts:
+        _parts.append(_locality)
+    if not _parts:
+        _st = _addr.get("state")
+        if _st:
+            _parts = [_st]
+        elif _data.get("display_name"):
+            _parts = [_data["display_name"].split(",")[0].strip()]
+    _label = ", ".join(_parts[:2])
+    return _label or None
 
 
 _M_PER_DEG = 111320.0  # metres per degree of latitude (equirectangular approx)
@@ -544,6 +628,9 @@ class BlueskyNotification(object):
         _range = self._range_line(telemetry)
         if _range:
             _lines.append(_range)
+        _place = _place_label(telemetry["lat"], telemetry["lon"])
+        if _place:
+            _lines.append("📍 Over %s" % _place)
         _lines.append("sondehub.org/%s" % strip_sonde_serial(_id))
         _lines.append("#radiosonde #sondehub #hamradio")
 
@@ -559,13 +646,15 @@ class BlueskyNotification(object):
             telemetry["freq"],
             "descending" if _descending else "ascending",
         )
-        if _range:
+        if _place:
+            _desc = _desc[:-1] + ", over %s." % _place
+        elif _range:
             _desc = _desc[:-1] + ", %s." % _range
         _params = self._balloon_params(
             telemetry,
             title=_title,
             desc=_desc,
-            alt_line="At %s m (%s ft)" % ("{:,}".format(int(telemetry["alt"])), _ft(telemetry["alt"])),
+            alt_line="At %s" % _m(telemetry["alt"]),
             track=self.sondes.get(_id, {}).get("path"),
         )
 
@@ -582,16 +671,13 @@ class BlueskyNotification(object):
         _descent = abs(sonde_state["ascent_rate"])
         _lines = [
             "💥 Balloon burst: %s %s" % (self._type_str(telemetry), _id),
-            "Peak altitude %s m · now descending %.0f m/s"
-            % ("{:,}".format(int(_max_alt)), _descent),
+            "Peak altitude %s · now descending %.0f m/s" % (_m(_max_alt), _descent),
         ]
         _stat = telemetry["freq"]
         _range = self._range_line(telemetry)
         if _range:
             _stat += " · " + _range
         _lines.append(_stat)
-        _lines.append("sondehub.org/%s" % strip_sonde_serial(_id))
-        _lines.append("#radiosonde #sondehub")
 
         # Predict the landing point by falling from here through the winds we
         # measured on the way up (the sonde was a wind tracer on ascent). The
@@ -606,10 +692,21 @@ class BlueskyNotification(object):
             # ascent, descent rate is modelled), floored/capped to stay useful.
             _radius_nm = min(8.0, max(1.0, 0.15 * _drift_nm))
             _mins_to_ground = _pred["dur_s"] / 60.0
+            _place = _place_label(_pred["lat"], _pred["lon"])
+            _where = (" near %s" % _place) if _place else ""
+            _lines.append(
+                "📍 Predicted landing%s (~%s downwind)" % (_where, _km(_pred["drift_m"]))
+            )
             _desc = (
-                "%s radiosonde %s burst at %s ft. Predicted landing zone from "
-                "the ascent winds is marked; the circle is the drift uncertainty."
-                % (self._type_str(telemetry), strip_sonde_serial(_id), _ft(_max_alt))
+                "%s radiosonde %s burst at %s. Predicted landing%s (~%s downwind) "
+                "from the ascent winds; the circle is the drift uncertainty."
+                % (
+                    self._type_str(telemetry),
+                    strip_sonde_serial(_id),
+                    _m(_max_alt),
+                    _where,
+                    _km(_pred["drift_m"]),
+                )
             )
         else:
             # No usable ascent profile - fall back to a modest altitude-scaled
@@ -617,16 +714,22 @@ class BlueskyNotification(object):
             _center = None
             _radius_nm = min(8.0, max(2.0, (telemetry["alt"] / 1000.0) * 0.25))
             _mins_to_ground = telemetry["alt"] / max(3.0, _descent) / 60.0
+            _place = _place_label(telemetry["lat"], telemetry["lon"])
+            if _place:
+                _lines.append("📍 Descending over %s" % _place)
             _desc = (
-                "%s radiosonde %s burst at %s ft and is descending on parachute. "
+                "%s radiosonde %s burst at %s and is descending on parachute. "
                 "The circle is a rough landing-zone estimate."
-                % (self._type_str(telemetry), strip_sonde_serial(_id), _ft(_max_alt))
+                % (self._type_str(telemetry), strip_sonde_serial(_id), _m(_max_alt))
             )
+        _lines.append("sondehub.org/%s" % strip_sonde_serial(_id))
+        _lines.append("#radiosonde #sondehub")
+
         _params = self._balloon_params(
             telemetry,
-            title="Balloon burst at %s ft" % _ft(_max_alt),
+            title="Balloon burst at %s" % _m(_max_alt),
             desc=_desc,
-            alt_line="Burst %s m (%s ft)" % ("{:,}".format(int(_max_alt)), _ft(_max_alt)),
+            alt_line="Burst %s" % _m(_max_alt),
             until="Landing expected ~%.0f min" % _mins_to_ground,
             track=_path,
             radius_nm=_radius_nm,
@@ -644,14 +747,12 @@ class BlueskyNotification(object):
         _alt_m = telemetry["alt"]
         _lines = [
             "🛬 Balloon down: %s %s" % (self._type_str(telemetry), _id),
-            "Signal lost at %s m - likely below the horizon or on the ground"
-            % "{:,}".format(int(_alt_m)),
+            "Signal lost at %s - likely below the horizon or on the ground"
+            % _m(_alt_m),
         ]
         _range = self._range_line(telemetry)
         if _range:
             _lines.append(_range)
-        _lines.append("sondehub.org/%s" % strip_sonde_serial(_id))
-        _lines.append("#radiosonde #sondehub")
 
         # By now the sonde is low, so a descent prediction from the last-heard
         # altitude is short-range and tight. Fall back to an altitude-scaled
@@ -662,24 +763,32 @@ class BlueskyNotification(object):
         if _pred:
             _center = (_pred["lat"], _pred["lon"])
             _radius_nm = min(6.0, max(0.5, 0.15 * (_pred["drift_m"] / 1852.0)))
+            _place = _place_label(_pred["lat"], _pred["lon"])
+            _where = (" near %s" % _place) if _place else ""
+            _lines.append("📍 Estimated landing%s" % (_where or " (see map)"))
             _desc = (
-                "%s radiosonde %s - signal lost. Estimated landing/search area "
+                "%s radiosonde %s - signal lost. Estimated landing/search area%s "
                 "from the last-heard position and the ascent winds is marked."
-                % (self._type_str(telemetry), strip_sonde_serial(_id))
+                % (self._type_str(telemetry), strip_sonde_serial(_id), _where)
             )
         else:
             _center = None
             _radius_nm = min(10.0, max(1.0, (_alt_m / 1000.0) * 1.0))
+            _place = _place_label(telemetry["lat"], telemetry["lon"])
+            if _place:
+                _lines.append("📍 Last heard over %s" % _place)
             _desc = (
                 "%s radiosonde %s - last position before signal loss. "
                 "The circle is a search-area estimate from the last-heard altitude."
                 % (self._type_str(telemetry), strip_sonde_serial(_id))
             )
+        _lines.append("sondehub.org/%s" % strip_sonde_serial(_id))
+        _lines.append("#radiosonde #sondehub")
         _params = self._balloon_params(
             telemetry,
-            title="Balloon down - last heard at %s ft" % _ft(_alt_m),
+            title="Balloon down - last heard at %s" % _m(_alt_m),
             desc=_desc,
-            alt_line="Last heard %s m (%s ft)" % ("{:,}".format(int(_alt_m)), _ft(_alt_m)),
+            alt_line="Last heard %s" % _m(_alt_m),
             until="Last heard %s" % _last_local,
             track=_path,
             radius_nm=_radius_nm,
@@ -959,8 +1068,9 @@ class BlueskyNotification(object):
 
 if __name__ == "__main__":
     # Test post: python -m autorx.bluesky <handle> <app_password>
-    # Posts a synthetic burst alert with a full map card (flight track +
-    # landing-zone circle) to verify the nerdymark.com card flow end-to-end.
+    # Drives the real post_burst path over a synthetic ascent so the map card,
+    # landing prediction, and reverse-geocoded place name all get exercised
+    # end-to-end against the nerdymark.com render service.
     import sys
 
     logging.basicConfig(
@@ -972,33 +1082,33 @@ if __name__ == "__main__":
         station_position=(37.32, -121.89, 30.0),
         station_callsign="TEST-STATION",
     )
+
+    # Synthetic ascent from ~Fremont with altitude-veering wind, 0 -> ~26.5 km.
+    _lat, _lon, _t, _alt, _path = 37.30, -121.90, 0.0, 0.0, []
+    while _alt <= 26500:
+        _path.append((_lat, _lon, _alt, _t))
+        _dt = 30.0
+        _we, _wn = 5 + _alt / 1000.0 * 1.2, -3 + _alt / 2000.0
+        _lon += (_we * _dt) / (_M_PER_DEG * math.cos(math.radians(_lat)))
+        _lat += (_wn * _dt) / _M_PER_DEG
+        _alt += 5 * _dt
+        _t += _dt
+
+    _id = "TEST0000001"
+    _bsky.sondes[_id] = {
+        "max_alt": _alt,
+        "path": _path,
+        "post_ref": None,
+        "last_time": time.time(),
+    }
     _telem = {
-        "id": "TEST0000001",
-        "lat": 37.9013,
-        "lon": -121.6521,
-        "alt": 9514.0,
+        "id": _id,
+        "lat": _path[-1][0],
+        "lon": _path[-1][1],
+        "alt": _path[-1][2] - 500,
         "type": "RS41",
         "freq": "404.200 MHz",
+        "datetime_dt": datetime.datetime.now(datetime.timezone.utc),
     }
-    _params = _bsky._balloon_params(
-        _telem,
-        title="Balloon burst at 31,214 ft (test)",
-        desc="radiosonde_auto_rx map-card TEST post. Not a real flight.",
-        alt_line="Burst 9,514 m (31,214 ft)",
-        until="Landing expected ~25 min",
-        track=[
-            (37.7358, -122.2219),
-            (37.7702, -122.1050),
-            (37.8021, -121.9810),
-            (37.8555, -121.8102),
-            (37.9013, -121.6521),
-        ],
-        radius_nm=3.0,
-    )
-    _bsky.post_card(
-        "💥 Balloon burst (map-card TEST): RS41 TEST0000001\n"
-        "Peak altitude 9,514 m · now descending 12 m/s\n"
-        "404.200 MHz\n#radiosonde #sondehub",
-        _params,
-    )
+    _bsky.post_burst(_telem, {"ascent_rate": -38.0})
     _bsky.close()
