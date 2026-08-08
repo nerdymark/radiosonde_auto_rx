@@ -15,6 +15,7 @@
 import datetime
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -56,6 +57,13 @@ MAP_TIMEOUT = 20
 # handles must omit both params - the map card still works without a backlink.
 BACKLINK_DOMAIN = "nerdymark.com"
 
+# The render service's reverse proxy rejects long URLs with a fast 502 (~2 KB
+# query ceiling), well before the map API's documented 100-point track limit.
+# Keep the whole query string under this so the map.png fetch AND the same-
+# query page-embed URL both stay safe; the track is thinned to fit (the bsky
+# backlink params are added later in post_card, hence the headroom).
+MAX_QUERY_CHARS = 1800
+
 # Timezone for human-readable times in card text (the host clock is UTC).
 STATION_TZ = ZoneInfo("America/Los_Angeles")
 
@@ -81,12 +89,115 @@ def _downsample(points, limit=100):
     return [points[i] for i in idx]
 
 
+def _telem_time(telemetry):
+    """Epoch seconds for a telemetry frame, from its datetime if present."""
+    try:
+        return telemetry["datetime_dt"].timestamp()
+    except Exception:
+        return time.time()
+
+
 def _track_param(points):
     return ";".join("%.4f,%.4f" % (p[0], p[1]) for p in _downsample(points))
 
 
+def _fit_track(points, budget):
+    """Largest-detail track string whose URL-encoded length fits `budget`
+    chars. Starts from the map API's 100-point cap and thins until it fits
+    (each point encodes to ~22 chars, so this converges in a few steps)."""
+    if budget <= 0:
+        return None
+    cap = min(len(points), 100)
+    start = max(2, min(cap, budget // 22 + 4))
+    for n in range(start, 1, -1):
+        val = ";".join("%.4f,%.4f" % (p[0], p[1]) for p in _downsample(points, n))
+        if len(urlencode({"track": val})) - len("track=") <= budget:
+            return val
+    return None
+
+
 def _ft(alt_m):
     return "{:,}".format(int(alt_m * 3.28084))
+
+
+_M_PER_DEG = 111320.0  # metres per degree of latitude (equirectangular approx)
+
+
+def _wind_profile(path):
+    """Turn an ascent path into a wind profile. On the way up the balloon is a
+    near-perfect wind tracer, so each consecutive pair of fixes gives the
+    horizontal wind (east/north m/s) at their mean altitude. Returns a list of
+    (alt_m, wind_e, wind_n) sorted by altitude. `path` is [(lat, lon, alt, t),
+    ...] oldest-first."""
+    samples = []
+    for a, b in zip(path, path[1:]):
+        lat1, lon1, alt1, t1 = a[0], a[1], a[2], a[3]
+        lat2, lon2, alt2, t2 = b[0], b[1], b[2], b[3]
+        dt = t2 - t1
+        if dt <= 0 or alt2 <= alt1:  # only ascending, forward-in-time legs
+            continue
+        lat0 = math.radians((lat1 + lat2) / 2.0)
+        d_e = (lon2 - lon1) * math.cos(lat0) * _M_PER_DEG
+        d_n = (lat2 - lat1) * _M_PER_DEG
+        samples.append(((alt1 + alt2) / 2.0, d_e / dt, d_n / dt))
+    samples.sort(key=lambda s: s[0])
+    return samples
+
+
+def _wind_at(samples, h):
+    """Linearly interpolate the wind (e, n) at altitude h from a sorted
+    profile, clamped to the ends."""
+    if not samples:
+        return 0.0, 0.0
+    if h <= samples[0][0]:
+        return samples[0][1], samples[0][2]
+    if h >= samples[-1][0]:
+        return samples[-1][1], samples[-1][2]
+    for i in range(1, len(samples)):
+        if h <= samples[i][0]:
+            a0, e0, n0 = samples[i - 1]
+            a1, e1, n1 = samples[i]
+            f = (h - a0) / (a1 - a0) if a1 > a0 else 0.0
+            return e0 + f * (e1 - e0), n0 + f * (n1 - n0)
+    return samples[-1][1], samples[-1][2]
+
+
+def predict_landing(path, lat, lon, alt):
+    """Predict a radiosonde's landing point by integrating a parachute
+    descent from (lat, lon, alt) back down through the winds we measured on
+    the way up. The descent rate rises with altitude as air thins
+    (v(h) = V0 * exp(h / 2H), the standard density-scaling used by hobby
+    predictors), so the sonde spends most of its time - and drift - in the
+    lower atmosphere. Returns {lat, lon, drift_m, dur_s} or None if the
+    ascent profile is too thin to be useful."""
+    samples = _wind_profile(path)
+    if len(samples) < 3 or alt <= 0:
+        return None
+
+    V0 = 5.0        # sea-level parachute descent rate, m/s (typical RS41 ~5)
+    SCALE_H = 7000.0  # atmospheric density scale height, m
+    STEP = 250.0
+
+    drift_e = drift_n = dur = 0.0
+    h = alt
+    while h > 0:
+        dh = min(STEP, h)
+        hm = h - dh / 2.0
+        v = V0 * math.exp(hm / (2.0 * SCALE_H))
+        dt = dh / v
+        we, wn = _wind_at(samples, hm)
+        drift_e += we * dt
+        drift_n += wn * dt
+        dur += dt
+        h -= dh
+
+    lat0 = math.radians(lat)
+    return {
+        "lat": lat + drift_n / _M_PER_DEG,
+        "lon": lon + drift_e / (_M_PER_DEG * math.cos(lat0)),
+        "drift_m": math.hypot(drift_e, drift_n),
+        "dur_s": dur,
+    }
 
 
 def _facets(text):
@@ -280,7 +391,14 @@ class BlueskyNotification(object):
                 "track": GenericTrack(max_elements=20),
                 # Coarse flight path for the map card (the GenericTrack above
                 # only keeps 20 elements for rate averaging).
-                "path": [(telemetry["lat"], telemetry["lon"])],
+                "path": [
+                    (
+                        telemetry["lat"],
+                        telemetry["lon"],
+                        telemetry["alt"],
+                        _telem_time(telemetry),
+                    )
+                ],
                 "path_time": time.time(),
                 "last_telem": telemetry,
             }
@@ -318,7 +436,14 @@ class BlueskyNotification(object):
             self.sondes[_id]["max_alt"] = telemetry["alt"]
 
         if (time.time() - self.sondes[_id]["path_time"]) >= self.PATH_MIN_INTERVAL:
-            self.sondes[_id]["path"].append((telemetry["lat"], telemetry["lon"]))
+            self.sondes[_id]["path"].append(
+                (
+                    telemetry["lat"],
+                    telemetry["lon"],
+                    telemetry["alt"],
+                    _telem_time(telemetry),
+                )
+            )
             self.sondes[_id]["path_time"] = time.time()
             if len(self.sondes[_id]["path"]) > 1000:
                 self.sondes[_id]["path"] = _downsample(self.sondes[_id]["path"], 500)
@@ -468,24 +593,44 @@ class BlueskyNotification(object):
         _lines.append("sondehub.org/%s" % strip_sonde_serial(_id))
         _lines.append("#radiosonde #sondehub")
 
-        # Rough landing-zone radius: drift during parachute descent scales
-        # with burst altitude; ~0.5 NM per km of altitude is a usable search
-        # circle without a real wind model.
-        _radius_nm = min(30.0, max(2.0, (_max_alt / 1000.0) * 0.5))
-        _mins_to_ground = telemetry["alt"] / max(3.0, _descent) / 60.0
-        _desc = (
-            "%s radiosonde %s burst at %s ft and is descending on parachute. "
-            "The circle is a rough landing-zone estimate."
-            % (self._type_str(telemetry), strip_sonde_serial(_id), _ft(_max_alt))
-        )
+        # Predict the landing point by falling from here through the winds we
+        # measured on the way up (the sonde was a wind tracer on ascent). The
+        # circle then sits on the PREDICTED landing, tight, instead of being a
+        # bay-sized blob centred on the burst point.
+        _path = self.sondes.get(_id, {}).get("path")
+        _pred = predict_landing(_path, telemetry["lat"], telemetry["lon"], telemetry["alt"])
+        if _pred:
+            _center = (_pred["lat"], _pred["lon"])
+            _drift_nm = _pred["drift_m"] / 1852.0
+            # Uncertainty ~15% of the predicted drift (winds evolve since
+            # ascent, descent rate is modelled), floored/capped to stay useful.
+            _radius_nm = min(8.0, max(1.0, 0.15 * _drift_nm))
+            _mins_to_ground = _pred["dur_s"] / 60.0
+            _desc = (
+                "%s radiosonde %s burst at %s ft. Predicted landing zone from "
+                "the ascent winds is marked; the circle is the drift uncertainty."
+                % (self._type_str(telemetry), strip_sonde_serial(_id), _ft(_max_alt))
+            )
+        else:
+            # No usable ascent profile - fall back to a modest altitude-scaled
+            # circle around the current position (still far tighter than before).
+            _center = None
+            _radius_nm = min(8.0, max(2.0, (telemetry["alt"] / 1000.0) * 0.25))
+            _mins_to_ground = telemetry["alt"] / max(3.0, _descent) / 60.0
+            _desc = (
+                "%s radiosonde %s burst at %s ft and is descending on parachute. "
+                "The circle is a rough landing-zone estimate."
+                % (self._type_str(telemetry), strip_sonde_serial(_id), _ft(_max_alt))
+            )
         _params = self._balloon_params(
             telemetry,
             title="Balloon burst at %s ft" % _ft(_max_alt),
             desc=_desc,
             alt_line="Burst %s m (%s ft)" % ("{:,}".format(int(_max_alt)), _ft(_max_alt)),
             until="Landing expected ~%.0f min" % _mins_to_ground,
-            track=self.sondes.get(_id, {}).get("path"),
+            track=_path,
             radius_nm=_radius_nm,
+            center=_center,
         )
 
         # Thread the burst under this sonde's discovery post (from memory, or the
@@ -508,23 +653,37 @@ class BlueskyNotification(object):
         _lines.append("sondehub.org/%s" % strip_sonde_serial(_id))
         _lines.append("#radiosonde #sondehub")
 
-        # Search radius from the last-heard altitude: the sonde keeps
-        # drifting below the horizon, so ~2 NM per remaining km.
-        _radius_nm = min(15.0, max(1.0, (_alt_m / 1000.0) * 2.0))
+        # By now the sonde is low, so a descent prediction from the last-heard
+        # altitude is short-range and tight. Fall back to an altitude-scaled
+        # search circle if the ascent profile is too thin.
         _last_local = datetime.datetime.now(STATION_TZ).strftime("%H:%M %Z")
-        _desc = (
-            "%s radiosonde %s - last position before signal loss. "
-            "The circle is a search-area estimate from the last-heard altitude."
-            % (self._type_str(telemetry), strip_sonde_serial(_id))
-        )
+        _path = self.sondes.get(_id, {}).get("path")
+        _pred = predict_landing(_path, telemetry["lat"], telemetry["lon"], _alt_m)
+        if _pred:
+            _center = (_pred["lat"], _pred["lon"])
+            _radius_nm = min(6.0, max(0.5, 0.15 * (_pred["drift_m"] / 1852.0)))
+            _desc = (
+                "%s radiosonde %s - signal lost. Estimated landing/search area "
+                "from the last-heard position and the ascent winds is marked."
+                % (self._type_str(telemetry), strip_sonde_serial(_id))
+            )
+        else:
+            _center = None
+            _radius_nm = min(10.0, max(1.0, (_alt_m / 1000.0) * 1.0))
+            _desc = (
+                "%s radiosonde %s - last position before signal loss. "
+                "The circle is a search-area estimate from the last-heard altitude."
+                % (self._type_str(telemetry), strip_sonde_serial(_id))
+            )
         _params = self._balloon_params(
             telemetry,
             title="Balloon down - last heard at %s ft" % _ft(_alt_m),
             desc=_desc,
             alt_line="Last heard %s m (%s ft)" % ("{:,}".format(int(_alt_m)), _ft(_alt_m)),
             until="Last heard %s" % _last_local,
-            track=self.sondes.get(_id, {}).get("path"),
+            track=_path,
             radius_nm=_radius_nm,
+            center=_center,
         )
 
         _ref = self.sondes.get(_id, {}).get("post_ref") or self._recall_post(_id)
@@ -535,18 +694,20 @@ class BlueskyNotification(object):
 
     def _balloon_params(
         self, telemetry, title, desc, alt_line=None, until=None, track=None,
-        radius_nm=None,
+        radius_nm=None, center=None,
     ):
         """Query params for the nerdymark.com balloon map page + PNG (the two
-        endpoints get the IDENTICAL query string). `desc` must stay URL-free:
-        the server strips URL-like tokens (including "sondehub.org")."""
+        endpoints get the IDENTICAL query string). The event marker + any
+        radius circle sit at `center` (lat, lon) when given - e.g. a predicted
+        landing point offset from the track's end - otherwise at the telemetry
+        position. `desc` must stay URL-free: the server strips URL-like tokens
+        (including "sondehub.org")."""
+        _lat, _lon = center if center else (telemetry["lat"], telemetry["lon"])
         _p = {
             "kind": "balloon",
-            "lat": "%.4f" % telemetry["lat"],
-            "lon": "%.4f" % telemetry["lon"],
+            "lat": "%.4f" % _lat,
+            "lon": "%.4f" % _lon,
         }
-        if track and len(track) >= 2:
-            _p["track"] = _track_param(track)
         if radius_nm:
             _p["radius_nm"] = "%.1f" % min(500.0, max(0.05, radius_nm))
         _p["id"] = strip_sonde_serial(telemetry["id"])[:40]
@@ -556,6 +717,15 @@ class BlueskyNotification(object):
             _p["alt"] = alt_line[:60]
         if until:
             _p["until"] = until[:60]
+
+        # Fit the flight track into the remaining URL budget (thin it until the
+        # whole query fits), so a long flight never overflows the proxy's URL
+        # limit. Reserve headroom for the bsky backlink params added later.
+        if track and len(track) >= 2:
+            _budget = MAX_QUERY_CHARS - len(urlencode(_p)) - len("&track=") - 60
+            _val = _fit_track(track, _budget)
+            if _val:
+                _p["track"] = _val
         return _p
 
     def _backlink_ok(self):
