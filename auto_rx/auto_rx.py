@@ -100,6 +100,19 @@ gpsd_adaptor = None
 temporary_block_list = {}
 
 
+def is_always_scan(freq_hz):
+    """True if freq_hz matches an always_scan (priority) channel — within
+    quantization/2, the same tolerance the scanner uses to match peaks. These
+    are frequencies we deliberately watch every pass (e.g. the local NWS RS41
+    on 403.998, which bursts ~2x daily), so they must NEVER be temporarily
+    blocked and are tracked all the way down rather than abandoned on burst."""
+    _tol = config.get("quantization", 10000) / 2.0
+    for _mhz in config.get("always_scan", []) or []:
+        if abs(freq_hz - _mhz * 1e6) < _tol:
+            return True
+    return False
+
+
 def allocate_sdr(check_only=False, task_description=""):
     """Allocate an un-used SDR for a task.
 
@@ -164,6 +177,10 @@ def start_scanner():
             sondehub_hint_distance=config["sondehub_hint_distance"],
             sondehub_hint_interval=config["sondehub_hint_interval"],
             sondehub_hint_max_age=config["sondehub_hint_max_age"],
+            always_scan_history=config["always_scan_history"],
+            always_scan_history_max=config["always_scan_history_max"],
+            always_scan_history_days=config["always_scan_history_days"],
+            always_scan_history_interval=config["always_scan_history_interval"],
             station_lat=config["station_lat"],
             station_lon=config["station_lon"],
             never_scan=config["never_scan"],
@@ -305,7 +322,13 @@ def start_decoder(freq, sonde_type, continuous=False):
             save_raw_hex=config["save_raw_hex"],
             wideband_sondes=config["wideband_sondes"],
             close_on_encrypted=config["close_on_encrypted"],
-            abandon_after_burst=config["abandon_after_burst"]
+            # Never abandon-on-burst an always_scan channel: it's a frequency we
+            # deliberately watch (our local balloon), so track it all the way to
+            # landing (feeding the burst/landing notifications) instead of
+            # dropping it to re-scan — and so it never emits the BurstAbandon
+            # exit state that would temporarily block it.
+            abandon_after_burst=0 if is_always_scan(freq)
+            else config["abandon_after_burst"],
         )
         autorx.sdr_list[_device_idx]["task"] = autorx.task_list[freq]["task"]
 
@@ -393,9 +416,18 @@ def handle_scan_results():
                 if _too_close:
                     continue
 
+                # always_scan channels are never blocked — purge any stale entry
+                # (e.g. left by an older build) and let the decoder start.
+                if is_always_scan(_freq) and _freq in temporary_block_list:
+                    temporary_block_list.pop(_freq, None)
+                    logging.info(
+                        "Task Manager - %.3f MHz is an always_scan channel; ignoring temporary block."
+                        % (_freq / 1e6)
+                    )
+
                 # Check the frequency is not in our temporary block list
                 # (This may happen from time-to-time depending on the timing of the scan thread)
-                if _freq in temporary_block_list.keys():
+                if (not is_always_scan(_freq)) and _freq in temporary_block_list.keys():
                     if temporary_block_list[_freq] > (
                         time.time() - config["temporary_block_time"] * 60
                     ):
@@ -451,17 +483,24 @@ def clean_task_list():
             # Check the exit state of the task for any abnormalities:
             if (_exit_state == "Encrypted") or (_exit_state == "TempBlock"):
                 # This task was a decoder, and it has encountered an encrypted sonde, or one too far away.
-                logging.info(
-                    "Task Manager - Adding temporary block for frequency %.3f MHz"
-                    % (_key / 1e6)
-                )
-                # Add the sonde's frequency to the global temporary block-list
-                temporary_block_list[_key] = time.time()
-                # If there is a scanner currently running, add it to the scanners internal block list.
-                if "SCAN" in autorx.task_list:
-                    autorx.task_list["SCAN"]["task"].add_temporary_block(_key)
+                if is_always_scan(_key):
+                    # Our watched channel — never block it, just let it re-scan.
+                    logging.info(
+                        "Task Manager - %.3f MHz exited %s but is an always_scan channel; not blocking."
+                        % (_key / 1e6, _exit_state)
+                    )
+                else:
+                    logging.info(
+                        "Task Manager - Adding temporary block for frequency %.3f MHz"
+                        % (_key / 1e6)
+                    )
+                    # Add the sonde's frequency to the global temporary block-list
+                    temporary_block_list[_key] = time.time()
+                    # If there is a scanner currently running, add it to the scanners internal block list.
+                    if "SCAN" in autorx.task_list:
+                        autorx.task_list["SCAN"]["task"].add_temporary_block(_key)
 
-            if _exit_state == "BurstAbandon":
+            if _exit_state == "BurstAbandon" and not is_always_scan(_key):
                 # This decoder abandoned a burst/descending sonde so the SDR can
                 # re-scan for other sondes still aloft. Block its frequency for
                 # burst_block_time minutes (backdated stamp - the shared expiry

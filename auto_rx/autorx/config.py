@@ -84,6 +84,10 @@ def read_auto_rx_config(filename, no_sdr_test=False):
         "sondehub_hint_distance": 0.0,
         "sondehub_hint_interval": 600,
         "sondehub_hint_max_age": 60,
+        "always_scan_history": False,
+        "always_scan_history_max": 10,
+        "always_scan_history_days": 0,
+        "always_scan_history_interval": 3600,
         "always_decode": [],
         # Location Settings
         "station_lat": 0.0,
@@ -325,6 +329,36 @@ def read_auto_rx_config(filename, no_sdr_test=False):
                 "Config - Missing sondehub_hint_max_age option, using default (60 minutes)"
             )
             auto_rx_config["sondehub_hint_max_age"] = 60
+
+        # nerdscan fork - learn always_scan (priority) channels from our own
+        # decoded-flight history (log/ filenames). See scan._update_history_hints.
+        try:
+            auto_rx_config["always_scan_history"] = config.getboolean(
+                "search_params", "always_scan_history"
+            )
+        except:
+            logging.debug(
+                "Config - Missing always_scan_history option, using default (False)"
+            )
+            auto_rx_config["always_scan_history"] = False
+        try:
+            auto_rx_config["always_scan_history_max"] = config.getint(
+                "search_params", "always_scan_history_max"
+            )
+        except:
+            auto_rx_config["always_scan_history_max"] = 10
+        try:
+            auto_rx_config["always_scan_history_days"] = config.getint(
+                "search_params", "always_scan_history_days"
+            )
+        except:
+            auto_rx_config["always_scan_history_days"] = 0
+        try:
+            auto_rx_config["always_scan_history_interval"] = config.getint(
+                "search_params", "always_scan_history_interval"
+            )
+        except:
+            auto_rx_config["always_scan_history_interval"] = 3600
 
         # Location Settings
         auto_rx_config["station_lat"] = config.getfloat("location", "station_lat")

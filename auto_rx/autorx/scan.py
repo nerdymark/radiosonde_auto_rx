@@ -691,6 +691,10 @@ class SondeScanner(object):
         sondehub_hint_distance=0.0,
         sondehub_hint_interval=600,
         sondehub_hint_max_age=60,
+        always_scan_history=False,
+        always_scan_history_max=10,
+        always_scan_history_days=0,
+        always_scan_history_interval=3600,
         station_lat=0.0,
         station_lon=0.0,
         never_scan=[],
@@ -817,6 +821,16 @@ class SondeScanner(object):
         # Live SondeHub hint frequencies (MHz), refreshed by _update_sondehub_hints.
         self.sondehub_hints = []
         self.sondehub_hints_last_query = 0.0
+        # Learned priority frequencies (MHz) from our own decoded-flight history,
+        # refreshed by _update_history_hints. Radiosonde launch sites reuse the
+        # same frequency, so a channel we've decoded before is a good bet next
+        # launch — this auto-grows always_scan from experience.
+        self.always_scan_history = always_scan_history
+        self.always_scan_history_max = always_scan_history_max
+        self.always_scan_history_days = always_scan_history_days
+        self.always_scan_history_interval = always_scan_history_interval
+        self.history_hints = []
+        self.history_hints_last_query = 0.0
         self.never_scan = never_scan
         self.snr_threshold = snr_threshold
         self.min_distance = min_distance
@@ -957,6 +971,8 @@ class SondeScanner(object):
 
             # Refresh SondeHub nearby-sonde hints (rate-limited; no-op if disabled).
             self._update_sondehub_hints()
+            # Refresh learned priority channels from our flight history.
+            self._update_history_hints()
 
             try:
                 _results = self.sonde_search()
@@ -1139,6 +1155,12 @@ class SondeScanner(object):
             )
 
             # Remove any frequencies in the temporary block list
+            # Priority (always_scan / SondeHub-hint) frequencies are never
+            # removed here: they are appended above precisely because we want a
+            # detect dwell on them every pass, so a block entry landing within
+            # quantization/2 of one (e.g. a spur next to the local balloon on
+            # 403.998) must not delete it.
+            _priority_hz = np.array(self._priority_frequencies()) * 1e6
             self.temporary_block_list_lock.acquire()
             for _frequency in self.temporary_block_list.copy().keys():
                 # Check the time the block was added.
@@ -1146,10 +1168,16 @@ class SondeScanner(object):
                     time.time() - self.temporary_block_time * 60
                 ):
                     # We should still be blocking this frequency, so remove any peaks with this frequency.
-                    _index = np.argwhere(
-                        np.abs(peak_frequencies - _frequency)
-                        < (self.quantization / 2.0)
+                    _block_mask = np.abs(peak_frequencies - _frequency) < (
+                        self.quantization / 2.0
                     )
+                    if _priority_hz.size and peak_frequencies.size:
+                        _protected = np.min(
+                            np.abs(peak_frequencies[:, None] - _priority_hz[None, :]),
+                            axis=1,
+                        ) < (self.quantization / 2.0)
+                        _block_mask &= ~_protected
+                    _index = np.argwhere(_block_mask)
                     peak_frequencies = np.delete(peak_frequencies, _index)
                     if len(_index) > 0:
                         self.log_debug(
@@ -1404,15 +1432,89 @@ class SondeScanner(object):
         return self.sonde_scanner_running
 
     def _priority_frequencies(self):
-        """The always_scan list plus any live SondeHub hints (MHz), with hints
-        that duplicate an always_scan channel (within quantization/2) removed."""
+        """The always_scan list plus any live SondeHub hints and learned
+        history frequencies (MHz), de-duplicated so a frequency within
+        quantization/2 of one already in the list is not added twice.
+        Explicit always_scan entries take precedence, then SondeHub hints,
+        then learned history."""
         _prio = list(self.always_scan)
-        for _hint in self.sondehub_hints:
+        for _extra in list(self.sondehub_hints) + list(self.history_hints):
             if all(
-                abs(_hint - _f) * 1e6 > (self.quantization / 2.0) for _f in _prio
+                abs(_extra - _f) * 1e6 > (self.quantization / 2.0) for _f in _prio
             ):
-                _prio.append(_hint)
+                _prio.append(_extra)
         return _prio
+
+    def _update_history_hints(self):
+        """Learn priority scan channels from our own decoded-flight history.
+
+        Every sonde log file is a flight we SUCCESSFULLY decoded, and its
+        transmit frequency is right in the filename, so the set of frequencies
+        we've heard before is a strong predictor of future launches from the
+        same sites (radiosonde sites reuse their frequency). We rank those
+        frequencies by most-recent-flight then flight-count and stage the top
+        always_scan_history_max as priority channels — treated exactly like
+        always_scan (scanned first, interleaved, never auto-blocked). Filename
+        parsing only (no file reads), rate-limited, and a failure just keeps
+        the previous list.
+        """
+        if not self.always_scan_history or self.always_scan_history_max <= 0:
+            return
+        _now = time.time()
+        if (_now - self.history_hints_last_query) < self.always_scan_history_interval:
+            return
+        self.history_hints_last_query = _now
+
+        try:
+            from autorx.log_files import list_log_files
+
+            _cutoff = 0.0
+            if self.always_scan_history_days > 0:
+                _cutoff = _now - self.always_scan_history_days * 86400.0
+
+            # Group flights that sit in the same quantization bucket (so a site
+            # heard at 403.997/403.998/403.999 counts as one channel), but keep
+            # the ACTUAL most-recent decoded frequency for each — the bucket
+            # centre can be a couple kHz off the real transmit frequency (we have
+            # better luck on the exact freq we last heard).
+            # bucket (Hz) -> [flight_count, latest_epoch, latest_freq_mhz]
+            _by_freq = {}
+            for _f in list_log_files(quicklook=False):
+                _freq_mhz = _f.get("freq")
+                _dt = _f.get("datetime")           # e.g. "2026-08-08T23:18:59Z"
+                if not _freq_mhz:
+                    continue
+                _epoch = 0.0
+                if _dt:
+                    try:
+                        _epoch = datetime.datetime.strptime(
+                            _dt.replace("Z", ""), "%Y-%m-%dT%H:%M:%S"
+                        ).replace(tzinfo=datetime.timezone.utc).timestamp()
+                    except Exception:
+                        _epoch = 0.0
+                if _cutoff and _epoch and _epoch < _cutoff:
+                    continue
+                _bucket = round(_freq_mhz * 1e6 / self.quantization) * self.quantization
+                _rec = _by_freq.setdefault(_bucket, [0, 0.0, _freq_mhz])
+                _rec[0] += 1
+                if _epoch >= _rec[1]:
+                    _rec[1] = _epoch
+                    _rec[2] = _freq_mhz            # keep the most-recent exact freq
+
+            # Rank most-recent first, then by flight count; emit the real freqs.
+            _ranked = sorted(
+                _by_freq.values(), key=lambda v: (v[1], v[0]), reverse=True
+            )
+            _hints = [round(_v[2], 3) for _v in _ranked[: self.always_scan_history_max]]
+
+            if _hints != self.history_hints:
+                self.log_info(
+                    "Learned %d priority channel(s) from flight history: %s"
+                    % (len(_hints), ", ".join("%.3f MHz" % _h for _h in _hints))
+                )
+            self.history_hints = _hints
+        except Exception as e:
+            self.log_warning("Flight-history hint update failed - %s" % str(e))
 
     def _update_sondehub_hints(self):
         """Query SondeHub for sondes currently aloft within
@@ -1563,6 +1665,16 @@ class SondeScanner(object):
                 temporary_block_time) releases them after this many minutes instead.
                 None = the full temporary_block_time.
         """
+        # Never block a priority (always_scan / SondeHub-hint) frequency — these
+        # are channels we deliberately watch every pass.
+        for _always in self._priority_frequencies():
+            if abs(frequency - _always * 1e6) < (self.quantization / 2.0):
+                self.log_debug(
+                    "Not blocking %.3f MHz — it is an always_scan channel."
+                    % (frequency / 1e6)
+                )
+                return
+
         if block_time_min is None:
             _stamp = time.time()
         else:
