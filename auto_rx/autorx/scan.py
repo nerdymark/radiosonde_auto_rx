@@ -44,6 +44,15 @@ except ImportError:
         pass
 
 
+# Grouping grain (Hz) for learning priority channels from flight history: all
+# flights within this of each other are treated as ONE launch site (radiosonde
+# sites reuse their frequency but drift a couple kHz between flights). This is
+# deliberately coarser than the scan `quantization` (which can be as fine as
+# 1 kHz for peak resolution) so same-site flights don't split into duplicate
+# learned channels.
+HISTORY_BUCKET_HZ = 10000.0
+
+
 # Global for latest scan result
 scan_result = {
     "freq": [],
@@ -1438,11 +1447,19 @@ class SondeScanner(object):
         Explicit always_scan entries take precedence, then SondeHub hints,
         then learned history."""
         _prio = list(self.always_scan)
-        for _extra in list(self.sondehub_hints) + list(self.history_hints):
+        # SondeHub reports exact transmit frequencies, so dedupe at the scan
+        # quantization; learned-history channels are site-level, so dedupe them
+        # at the coarser site grain (against everything already staged).
+        for _hint in self.sondehub_hints:
             if all(
-                abs(_extra - _f) * 1e6 > (self.quantization / 2.0) for _f in _prio
+                abs(_hint - _f) * 1e6 > (self.quantization / 2.0) for _f in _prio
             ):
-                _prio.append(_extra)
+                _prio.append(_hint)
+        for _hint in self.history_hints:
+            if all(
+                abs(_hint - _f) * 1e6 > (HISTORY_BUCKET_HZ / 2.0) for _f in _prio
+            ):
+                _prio.append(_hint)
         return _prio
 
     def _update_history_hints(self):
@@ -1494,7 +1511,7 @@ class SondeScanner(object):
                         _epoch = 0.0
                 if _cutoff and _epoch and _epoch < _cutoff:
                     continue
-                _bucket = round(_freq_mhz * 1e6 / self.quantization) * self.quantization
+                _bucket = round(_freq_mhz * 1e6 / HISTORY_BUCKET_HZ) * HISTORY_BUCKET_HZ
                 _rec = _by_freq.setdefault(_bucket, [0, 0.0, _freq_mhz])
                 _rec[0] += 1
                 if _epoch >= _rec[1]:
