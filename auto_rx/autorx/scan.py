@@ -300,13 +300,13 @@ def parse_dft_detect_output(ret_output, sdr_name):
         _sonde_type = "DFM"
     elif "M10" in _type:
         logging.debug(
-            "Scanner (%s) - Detected a M10 Sonde! (Score: %.2f, Offset: %.1f Hz)"
+            "Scanner (%s) - Detected a M10 or M20 Sonde! (Score: %.2f, Offset: %.1f Hz)"
             % (sdr_name, _score, _offset_est)
         )
         _sonde_type = "M10"
     elif "M20" in _type:
         logging.debug(
-            "Scanner (%s) - Detected a M20 Sonde! (Score: %.2f, Offset: %.1f Hz)"
+            "Scanner (%s) - Detected a M10 or M20 Sonde! (Score: %.2f, Offset: %.1f Hz)"
             % (sdr_name, _score, _offset_est)
         )
         _sonde_type = "M20"
@@ -342,12 +342,12 @@ def parse_dft_detect_output(ret_output, sdr_name):
             % (sdr_name, _score, _offset_est)
         )
         _sonde_type = "LMS6"
-    elif "C34" in _type:
+    elif "C34C50" in _type:
         logging.debug(
-            "Scanner (%s) - Detected a Meteolabor C34/C50 Sonde! (Not yet supported...) (Score: %.2f)"
+            "Scanner (%s) - Detected a Meteolabor SRS-C34/C50 Sonde! (C34 not supported) (Score: %.2f)"
             % (sdr_name, _score)
         )
-        _sonde_type = "C34C50"
+        _sonde_type = "SRSC50"
     elif "MRZ" in _type:
         logging.debug(
             "Scanner (%s) - Detected a Meteo-Radiy MRZ Sonde! (Score: %.2f)"
@@ -414,6 +414,13 @@ def parse_dft_detect_output(ret_output, sdr_name):
         )
         _sonde_type = "RD94RD41"
 
+    elif "CF6GTH" in _type:
+        logging.debug(
+            "Scanner (%s) - Detected a HT-03/CF-06/GTH6! (Score: %.2f, Offset: %.1f Hz)"
+            % (sdr_name, _score, _offset_est)
+        )
+        _sonde_type = "CF6GTH"
+
     else:
         _sonde_type = None
 
@@ -436,7 +443,8 @@ def detect_sonde(
     save_detection_audio=False,
     ngp_tweak=False,
     wideband_sondes=False,
-    dft_threshold=0.0
+    dft_threshold=0.0,
+    exclude_types=[]
 ):
     """Receive some FM and attempt to detect the presence of a radiosonde.
 
@@ -455,6 +463,7 @@ def detect_sonde(
         dft_threshold (float): If > 0, override dft_detect's built-in per-type correlation
             score thresholds (0.6-0.8) with this value. Lower = more sensitive detection
             at the cost of more false positives. 0 = use dft_detect defaults.
+        exclude_types (list): A list of excluded sonde types. 
 
     Returns:
         str/None: Returns None if no sonde found, otherwise returns a sonde type, from the following:
@@ -490,6 +499,19 @@ def detect_sonde(
         gain_param = "-g %.1f " % gain
     else:
         gain_param = ""
+
+
+    # Generate command arguments to exclude radiosonde types
+    # Sanitize the incoming types against a known list of types
+    if len(exclude_types)>0:
+        exclude_types_sanitized = []
+        for _xtype in exclude_types:
+            if _xtype in ['DFM9','RS41','RS92','LMS6','IMET5','MK2LMS','M10','MEISEI','RD94RD41','MRZ','MTS01','CF6GTH','C34C50','WXR301','WXRPN9','IMET1AB','IMETafsk','IMET1RS','IMET4']:
+                exclude_types_sanitized.append(_xtype)
+
+        exclude_types_str = "--exclude-types " + ",".join(exclude_types_sanitized)
+    else:
+        exclude_types_str = ""
 
     # Adjust the detection bandwidth based on the band the scanning is occuring in.
     if frequency < 1000e6:
@@ -558,10 +580,11 @@ def detect_sonde(
 
         rx_test_command += os.path.join(
             rs_path, "dft_detect"
-        ) + " -t %d --iq --bw %d --dc %s- %d 16 2>/dev/null" % (
+        ) + " -t %d --iq --bw %d --dc %s%s - %d 16 2>/dev/null" % (
             dwell_time,
             _if_bw,
             ths_option,
+            exclude_types_str,
             _iq_bw,
         )
 
@@ -738,6 +761,7 @@ class SondeScanner(object):
         auto_block_time=30,
         ngp_tweak=False,
         wideband_sondes=False,
+        exclude_types=["IMET1AB","C34C50"],
         max_async_scan_workers=4
     ):
         """Initialise a Sonde Scanner Object.
@@ -809,6 +833,7 @@ class SondeScanner(object):
                 temporary_block_time so a real sonde appearing on a previously-spurious frequency isn't lost for long.
             ngp_tweak (bool): Narrow the detection filter when searching for 1680 MHz sondes, to enhance detection of RS92-NGPs.
             wideband_sondes (bool): Use a wider detection filter to allow detection of Weathex and wideband iMet sondes.
+            exclude_types (list): List of sonde types to exclude from detection
         """
 
         # Thread flag. This is set to True when a scan is running.
@@ -868,6 +893,8 @@ class SondeScanner(object):
         self.callback = callback
         self.save_detection_audio = save_detection_audio
         self.wideband_sondes = wideband_sondes
+        self.exclude_types = exclude_types
+
         self.max_async_scan_workers = max_async_scan_workers
 
         # Temporary block list.
@@ -1286,7 +1313,8 @@ class SondeScanner(object):
                     gain=self.gain,
                     bias=self.bias,
                     save_detection_audio=self.save_detection_audio,
-                    wideband_sondes=self.wideband_sondes
+                    wideband_sondes=self.wideband_sondes,
+                    exclude_types=self.exclude_types
                 )
 
                 # Process results
@@ -1368,7 +1396,8 @@ class SondeScanner(object):
                     dwell_time=self.detect_dwell_time,
                     save_detection_audio=self.save_detection_audio,
                     wideband_sondes=self.wideband_sondes,
-                    dft_threshold=self.dft_detect_threshold
+                    dft_threshold=self.dft_detect_threshold,
+                    exclude_types=self.exclude_types
                 )
 
                 if detected != None:

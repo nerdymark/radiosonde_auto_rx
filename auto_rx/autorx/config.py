@@ -165,11 +165,7 @@ def read_auto_rx_config(filename, no_sdr_test=False):
         "rotator_home_azimuth": 0,
         "rotator_home_elevation": 0,
         "rotator_azimuth_only": False,
-        # OziExplorer Settings
-        "ozi_enabled": False,
-        "ozi_update_rate": 5,
-        "ozi_host": "<broadcast>",
-        "ozi_port": 55681,
+        # Payload Summary Settings
         "payload_summary_enabled": False,
         "payload_summary_host": "<broadcast>",
         "payload_summary_port": 55672,
@@ -187,6 +183,7 @@ def read_auto_rx_config(filename, no_sdr_test=False):
         # "sondehub_contact_email": "none@none.com" # Commented out to ensure a warning message is shown on startup
         "wideband_sondes": False, # Wideband sonde detection / decoding
         "close_on_encrypted": True,
+        "exclude_types": ["IMET1AB","C34C50"], # Sonde types to exclude from detections
     }
 
     try:
@@ -423,12 +420,8 @@ def read_auto_rx_config(filename, no_sdr_test=False):
             )
             auto_rx_config["aprs_upload_rate"] = MINIMUM_APRS_UPDATE_RATE
 
-        # OziPlotter Settings
-        auto_rx_config["ozi_enabled"] = config.getboolean("oziplotter", "ozi_enabled")
-        auto_rx_config["ozi_update_rate"] = config.getint(
-            "oziplotter", "ozi_update_rate"
-        )
-        auto_rx_config["ozi_port"] = config.getint("oziplotter", "ozi_port")
+        # Payload Summary Settings
+
         auto_rx_config["payload_summary_enabled"] = config.getboolean(
             "oziplotter", "payload_summary_enabled"
         )
@@ -532,6 +525,8 @@ def read_auto_rx_config(filename, no_sdr_test=False):
             "WXRPN9": True,
             "IMETWIDE": False,
             "RD94RD41": True,
+            "CF6GTH": False,
+            "SRSC50": False,
             "UDP": False,
         }
 
@@ -872,13 +867,11 @@ def read_auto_rx_config(filename, no_sdr_test=False):
 
         # 1.7.5 - Targeted summary output
         try:
-            auto_rx_config["ozi_host"] = config.get("oziplotter", "ozi_host")
             auto_rx_config["payload_summary_host"] = config.get("oziplotter", "payload_summary_host")
         except:
             logging.warning(
-                "Config - Missing ozi_host or payload_summary_host option (new in v1.7.5), using default (<broadcast>)"
+                "Config - Missing payload_summary_host option (new in v1.7.5), using default (<broadcast>)"
             )
-            auto_rx_config["ozi_host"] = "<broadcast>"
             auto_rx_config["payload_summary_host"] = "<broadcast>"
 
         # 1.8.2 - Real time filtering
@@ -1019,6 +1012,17 @@ def read_auto_rx_config(filename, no_sdr_test=False):
             except:
                 auto_rx_config["caw_burst_altitude_threshold"] = 5000.0
 
+        # 1.9.0 - Allow excluding of specific radiosonde types
+        try:
+            auto_rx_config["exclude_types"] = json.loads(
+                config.get("advanced", "exclude_types")
+            )
+        except Exception as e:
+            logging.debug(
+                "Config - No or invalid exclude_types settings, defaulting to [\"IMET1AB\",\"C34C50\"]"
+            )
+            auto_rx_config["exclude_types"] = ['IMET1AB','C34C50']
+
         # If we are being called as part of a unit test, just return the config now.
         if no_sdr_test:
             return auto_rx_config
@@ -1130,13 +1134,6 @@ def read_auto_rx_config(filename, no_sdr_test=False):
             logging.critical(
                 "Rotator enabled in a multi-SDR configuration. Go read the warnings in the config file!"
             )
-            return None
-
-        # TODO: Revisit this limitation once the OziPlotter output sub-module is complete.
-        if (len(auto_rx_config["sdr_settings"].keys()) > 1) and auto_rx_config[
-            "ozi_enabled"
-        ]:
-            logging.critical("Oziplotter output enabled in a multi-SDR configuration.")
             return None
 
         if len(auto_rx_config["sdr_settings"].keys()) == 0:
