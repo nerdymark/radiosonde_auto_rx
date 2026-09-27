@@ -4,9 +4,10 @@
 #
 #   Posts radiosonde discovery / burst / lost-contact events to nerdymark.com's
 #   "caw" feed — an ephemeral, location-based social feed (caws live one hour).
-#   All caws are posted at the STATION location, so they appear in the operator's
-#   local feed; the sonde's distance/bearing goes in the text. Anonymous POST,
-#   no auth, like the site's other public write endpoints.
+#   Caws are posted at the BALLOON's position, so they appear on the feed where
+#   the sonde actually is; the station position is only a fallback for events
+#   with no sonde position (encrypted sondes) and feeds the distance/bearing
+#   text. Anonymous POST, no auth, like the site's other public write endpoints.
 #
 #   POST /api/caw  {latitude, longitude, timestamp, caw}
 #
@@ -224,6 +225,15 @@ class CawNotification(object):
         except Exception:
             return ""
 
+    @staticmethod
+    def _sonde_position(telemetry):
+        """(lat, lon) of the sonde, or None if the telemetry has no usable fix."""
+        _lat = telemetry.get("lat")
+        _lon = telemetry.get("lon")
+        if _lat is None or _lon is None or (_lat == 0.0 and _lon == 0.0):
+            return None
+        return (_lat, _lon)
+
     def post_discovery(self, telemetry):
         _id = telemetry["id"]
         if telemetry.get("encrypted", False):
@@ -233,7 +243,7 @@ class CawNotification(object):
             _text = "🎈 New radiosonde: %s %s on %s · %s m%s" % (
                 self._type_str(telemetry), _id, telemetry["freq"],
                 "{:,}".format(int(telemetry["alt"])), self._range_str(telemetry))
-        self.post_caw(_text)
+        self.post_caw(_text, position=self._sonde_position(telemetry))
 
     def post_burst(self, telemetry, sonde_state):
         _id = telemetry["id"]
@@ -241,7 +251,7 @@ class CawNotification(object):
             self._type_str(telemetry), _id,
             "{:,}".format(int(self.sondes[_id]["max_alt"])),
             abs(sonde_state["ascent_rate"]), self._range_str(telemetry))
-        self.post_caw(_text)
+        self.post_caw(_text, position=self._sonde_position(telemetry))
 
     def post_lost_contact(self, _id, sonde):
         _t = sonde.get("last_telem") or {}
@@ -250,22 +260,25 @@ class CawNotification(object):
         _text = "📡 Lost contact with %s %s — no telemetry for %d min, last heard at %s%s" % (
             (_t.get("subtype") or _t.get("type") or "sonde"), _id, _mins, _alt,
             self._range_str(_t) if "lat" in _t else "")
-        self.post_caw(_text)
+        self.post_caw(_text, position=self._sonde_position(_t))
 
     # ------------------------------------------------------------------ post
 
-    def post_caw(self, text):
-        """POST a caw at the station location. Failures logged, never raised."""
-        if self.station_position is None or self.station_position[0] == 0.0:
-            self.log_error("No station position — cannot post caw.")
-            return
+    def post_caw(self, text, position=None):
+        """POST a caw at `position` (lat, lon) — normally the balloon's —
+        falling back to the station location. Failures logged, never raised."""
+        if position is None:
+            if self.station_position is None or self.station_position[0] == 0.0:
+                self.log_error("No sonde or station position — cannot post caw.")
+                return
+            position = (self.station_position[0], self.station_position[1])
         _since = time.time() - self.last_post_time
         if _since < self.MIN_POST_INTERVAL:
             time.sleep(self.MIN_POST_INTERVAL - _since)
         try:
             _resp = requests.post(self.caw_url, json={
-                "latitude": self.station_position[0],
-                "longitude": self.station_position[1],
+                "latitude": position[0],
+                "longitude": position[1],
                 "timestamp": datetime.datetime.now(datetime.timezone.utc)
                 .isoformat().replace("+00:00", "Z"),
                 "caw": text[:self.CAW_MAX_CHARS],
